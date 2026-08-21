@@ -60,6 +60,7 @@
 ./dev doctor     # 本机有什么、缺什么、端口占没占
 ./dev livekit    # 从源码装 livekit-server
 ./dev actionlint # 装 GitHub Actions 静态检查器
+./dev act        # 用 Docker 在本地真跑一遍工作流
 ./dev clean      # 清掉 .dev/
 ```
 
@@ -81,35 +82,40 @@
 **结构:逻辑在 `./dev`,YAML 只剩样板。** 工作流做三件事 —— checkout、装 Go、
 挂一个 PostgreSQL service container —— 然后跑一行 `./dev ci`。
 
-这个拆分是针对「本机没 Docker、没 act,工作流验证不了」这个问题的正面解法:
-逻辑留在 YAML 里,推上去之前就是零验证;搬进 shell 脚本,它就能在笔记本上逐条跑,
-而剩下的样板交给 `actionlint` 静态校验(已并入 `./dev check`,
-`./dev actionlint` 可安装它 —— 纯 Go,不需要 Docker)。
+这么拆的起因是「本机没 Docker 没 act,工作流验证不了」:逻辑留在 YAML 里,
+推上去之前就是零验证。搬进 shell 脚本后它能在笔记本上逐条跑,剩下的样板交给
+`actionlint`。**后来 Docker 装上了,`act` 也就能用了**,于是整个工作流现在可以
+在本地真跑:
 
-`./dev ci` 优先使用环境里已有的后端(`OD_TEST_POSTGRES_DSN` / `OD_TEST_LIVEKIT_URL`),
-缺的自己起。结尾 `assert_suites_ran` 断言 pgstore 与 voice **确实跑了**:
-它们缺后端时自动 skip,不断言的话绿灯可能只是覆盖率空了一块。
+```sh
+./dev act        # 拉镜像(如缺)、必要时装 act、在 Docker 里跑完整工作流
+```
 
-### 验证到什么程度(重要,别高估也别低估)
+### 已验证(2026-08-21,`act` 实跑 Job succeeded)
 
-**已在本地实测:**
+逐步绿:`actions/checkout@v4` → `actions/setup-go@v5`(`go-version-file: go.mod`
+把 `go 1.27` 解析成实际版本)→ PostgreSQL service container(pgstore 套件真的连上
+`127.0.0.1:5432`)→ `./dev ci` 在容器里 `go install` 装好 LiveKit 并启动 →
+gofmt / vet / build / `test -race` → `assert_suites_ran` 确认两个外部套件都没被 skip。
 
-- `actionlint` 对本工作流干净;并且**反向验证过它不是摆设** —— 故意写错 runner 标签、
-  塞不存在的 action 输入,它都能抓出来(它是拿真实 action 元数据校验的)
-- `./dev ci` 两条路径都跑通:自起后端,以及 `OD_TEST_POSTGRES_DSN` 由环境提供
-  (后者就是 GitHub service container 的形态)
-- 跳过断言真的会失败:强行让 pgstore 套件 skip,`./dev ci` 以**退出码 1** 退出
-- `dev` 在 git 里是 `100755`(CI 直接 `./dev ci`,少了执行位就跑不了)
+**这一跑当场抓到一个真问题**:容器里没有 actionlint,workflow lint 那步会降级成
+一句 warning —— 也就是说 CI 根本没在校验工作流,正是 `assert_suites_ran` 想防的那种
+「静默空洞」。已修:`cmd_ci` 现在像装 LiveKit 一样确保 actionlint 存在,重跑后
+该步输出 `ok workflows clean`。
 
-**仍未验证(只能靠真跑一次):** GitHub 自身的管道 —— `actions/checkout`、
-`actions/setup-go` 能否把 `go 1.27` 解析成实际版本、service container 的端口映射与
-健康检查、runner 上 `go install livekit-server` 是否顺利。
+### act 的三个坑(都已在 `.actrc` 里处理,改动前先读那个文件)
 
-> 没有 shellcheck(Haskell 二进制,本机装不了),所以 actionlint 不分析 `run:` 里的
-> shell —— 但重构之后 YAML 里只剩 `run: ./dev ci` 一行,这个缺口基本被消掉了。
+1. **不指定镜像会弹交互式选择器**,非交互环境下直接 EOF 退出 → `.actrc` 里钉死
+   `catthehacker/ubuntu:act-latest`
+2. **Docker Desktop 的 `credsStore: desktop`** 让 act 拉镜像时带上空凭证,报
+   `authentication required`,而同一个镜像 `docker pull` 匿名拉完全正常 →
+   `.actrc` 里 `--pull=false`,镜像由 `./dev act` 用普通 `docker pull` 预先备好
+3. **act ≠ GitHub**:镜像是 `catthehacker/ubuntu:act-latest` 而非 GitHub 真正的
+   `ubuntu-latest`,且本机 arm64 / GitHub x86_64。**高保真复现,不是保证一致** ——
+   推上去之后仍然值得看一眼 Actions
 
-> **首次推送后必须去看一眼 Actions 结果。** 注意第一次很可能是红的,那是设计使然:
-> 任何一个后端没起来都会让套件 skip,进而被断言判失败,而不是悄悄绿灯。
+> 没有 shellcheck(Haskell 二进制,本机装不了),actionlint 不分析 `run:` 里的
+> shell;但重构后 YAML 里只剩 `run: ./dev ci` 一行,这个缺口基本被消掉了。
 
 ## 五、开发机环境(重要,都是坑)
 
@@ -208,7 +214,8 @@ PG 模式:`OD_STORE=postgres OD_POSTGRES_DSN='postgres://…' go run ./cmd/opend
 
 ## 八、下一步(按优先级)
 
-1. **确认 CI 首次运行结果**(见 §四 的未验证声明),绿了再往下走
+1. **对一眼 GitHub 上的 Actions 结果**:本地 `./dev act` 已跑绿,但 act 用的镜像与
+   架构和 GitHub 不同(见 §四),真跑一次仍值得确认
 2. **M1 开工**(PLANNING §3.3):权限/角色(allow/deny 位掩码,先进协议)、线程、
    Reaction、未读同步、`MESSAGE_UPDATE/DELETE`、`TYPING_START`、`PRESENCE_UPDATE`。
    §七 第 2、3 条已为它铺好路(序号语义、成员关系),可直接开工

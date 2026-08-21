@@ -1,0 +1,14 @@
+# Configuration for `act` (runs the GitHub Actions workflow locally in Docker).
+# Kept in the repo so ./dev act works the same for everyone.
+
+# Pin the runner image, otherwise act drops into an interactive picker and
+# dies on EOF when run non-interactively. "Medium" is act's own recommended
+# default: ~500MB, carries the tooling most actions expect.
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+
+# Do not force-pull images. With Docker Desktop's "desktop" credsStore and no
+# Docker Hub login, act asks the credential helper for docker.io, gets nothing
+# usable, and sends it anyway -- the pull then fails with "authentication
+# required" even though the same image pulls fine anonymously. Using the local
+# image avoids that path. Refresh images by hand with `docker pull` when needed.
+--pull=false

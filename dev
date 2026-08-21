@@ -16,6 +16,7 @@
 #   ./dev ci           exactly what CI runs (alias of test; uses OD_TEST_* if set)
 #   ./dev livekit      build livekit-server from source (needed by ./dev test)
 #   ./dev actionlint   install the GitHub Actions linter used by ./dev check
+#   ./dev act          run the real workflow in Docker (needs Docker)
 #   ./dev doctor       report what is and is not available on this machine
 #   ./dev clean        remove local dev state (.dev/)
 
@@ -67,6 +68,17 @@ find_pg() {
       "$HOME/.local/share/opendiscord/pg/bin" \
       "$(command -v pg_ctl >/dev/null 2>&1 && dirname "$(command -v pg_ctl)" || true)"; do
     if [ -n "$candidate" ] && [ -x "$candidate/pg_ctl" ]; then echo "$candidate"; return 0; fi
+  done
+  return 1
+}
+
+find_actionlint() {
+  local candidate
+  for candidate in \
+      "${OD_ACTIONLINT_BIN:-}" \
+      "$(command -v actionlint 2>/dev/null || true)" \
+      "$HOME/.local/bin/actionlint"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then echo "$candidate"; return 0; fi
   done
   return 1
 }
@@ -273,14 +285,9 @@ assert_suites_ran() {
 # Docker. It is optional so a clone without it still builds.
 lint_workflows() {
   [ -d "$ROOT/.github/workflows" ] || { note "  no workflows"; return 0; }
-  local lint="" candidate
-  for candidate in \
-      "${OD_ACTIONLINT_BIN:-}" \
-      "$(command -v actionlint 2>/dev/null || true)" \
-      "$HOME/.local/bin/actionlint"; do
-    if [ -n "$candidate" ] && [ -x "$candidate" ]; then lint="$candidate"; break; fi
-  done
-  if [ -z "${lint:-}" ]; then
+  local lint=""
+  lint="$(find_actionlint 2>/dev/null || true)"
+  if [ -z "$lint" ]; then
     warn "actionlint not installed -- workflow YAML unchecked (./dev actionlint)"
     return 0
   fi
@@ -289,8 +296,9 @@ lint_workflows() {
 
 cmd_actionlint() {
   require_go
-  if [ -x "$HOME/.local/bin/actionlint" ]; then
-    ok "already installed: $HOME/.local/bin/actionlint"
+  local existing
+  if existing="$(find_actionlint 2>/dev/null)"; then
+    ok "already installed: $existing"
     return 0
   fi
   step "Installing actionlint"
@@ -322,6 +330,8 @@ cmd_ci() {
   else
     warn "PostgreSQL unavailable -- the pgstore suite will skip"
   fi
+
+  find_actionlint >/dev/null 2>&1 || cmd_actionlint
 
   if [ -n "${OD_TEST_LIVEKIT_URL:-}" ]; then
     ok "using LiveKit from the environment"
@@ -464,6 +474,41 @@ EOF
   wait "$APP_PID"
 }
 
+# act runs the real workflow in Docker, which is the only way to exercise the
+# parts ./dev ci cannot reach on its own: actions/checkout, actions/setup-go,
+# and the PostgreSQL service container.
+cmd_act() {
+  require_go
+  command -v docker >/dev/null 2>&1 || die "act needs Docker, and none is installed"
+  docker info >/dev/null 2>&1 || die "Docker is installed but its daemon is not reachable"
+
+  local act_bin=""
+  for candidate in "$(command -v act 2>/dev/null || true)" "$HOME/.local/bin/act"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then act_bin="$candidate"; break; fi
+  done
+  if [ -z "$act_bin" ]; then
+    step "Installing act"
+    mkdir -p "$HOME/.local/bin"
+    GOBIN="$HOME/.local/bin" "$GO" install github.com/nektos/act@latest
+    act_bin="$HOME/.local/bin/act"
+  fi
+
+  # .actrc disables force-pull (see that file for the credential-helper
+  # reason), so any image the workflow needs has to be local already. Plain
+  # `docker pull` authenticates anonymously and works where act's does not.
+  local img
+  for img in catthehacker/ubuntu:act-latest \
+             $(awk '/^ *image:/ {print $2}' "$ROOT/.github/workflows/ci.yml"); do
+    if ! docker image inspect "$img" >/dev/null 2>&1; then
+      step "Pulling $img"
+      docker pull "$img"
+    fi
+  done
+
+  step "Running the workflow in Docker (this is slow; setup-go alone takes minutes)"
+  (cd "$ROOT" && "$act_bin" push -W .github/workflows/ci.yml)
+}
+
 cmd_clean() {
   # Stop a database left running by an earlier invocation before deleting the
   # files out from under it.
@@ -488,6 +533,7 @@ case "${1:-demo}" in
   check)      cmd_check ;;
   test|ci)    cmd_ci ;;
   actionlint) cmd_actionlint ;;
+  act)        cmd_act ;;
   livekit)  cmd_livekit ;;
   doctor)   cmd_doctor ;;
   clean)    cmd_clean ;;

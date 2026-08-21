@@ -84,43 +84,23 @@ OD_TEST_LIVEKIT_KEY=devkey OD_TEST_LIVEKIT_SECRET=secret go test ./internal/voic
 ## CI
 
 `.github/workflows/ci.yml` 刻意写得很薄:**所有检查逻辑都在 `./dev` 里**,
-工作流本身只做 checkout、装 Go、挂一个 PostgreSQL service container,
-然后跑一行 `./dev ci`。
+工作流只做 checkout、装 Go、挂一个 PostgreSQL service container,然后跑一行 `./dev ci`。
 
-这么拆是因为本机没有 Docker 也没有 act,工作流跑不起来 —— 逻辑留在 YAML 里
-就等于推上去之前谁也没验证过。搬进 shell 脚本后,那部分**可以在笔记本上逐条跑**,
-YAML 里只剩标准样板,而样板由 `actionlint` 静态校验(已并入 `./dev check`)。
+```sh
+./dev act        # 用 Docker 在本地把整个工作流真跑一遍
+```
 
 `./dev ci` 会用环境里给定的后端(GitHub 用 service container 提供 PostgreSQL),
 缺什么就自己起什么;末尾断言 pgstore 与 voice 套件**确实执行过** ——
 它们缺后端时会自动 skip,不断言的话「全绿」可能只是覆盖率空了一块。
 
-已在本地验证:`actionlint` 干净(且实测能抓出错误 runner 标签与不存在的 action 输入)、
-`./dev ci` 两条路径都跑通(自起后端 / 环境提供 PostgreSQL)、跳过断言在套件被 skip 时
-确实以退出码 1 失败。**尚未验证:GitHub 自身的管道**(checkout、setup-go 解析 `go 1.27`、
-service container 端口映射)—— 这只能靠真跑一次,首次推送后请看一眼 Actions。
+### 已验证到什么程度
 
-## 配置
+用 `act` 在 Docker 里完整跑通(Job succeeded),逐步绿:`actions/checkout` →
+`actions/setup-go`(把 `go 1.27` 解析成实际版本)→ PostgreSQL service container
+(pgstore 套件真的连上了 `127.0.0.1:5432`)→ `./dev ci` 在容器里从源码装好
+LiveKit 并启动 → gofmt / vet / build / `test -race` → 跳过断言确认两个外部套件都跑了。
 
-| 环境变量 | 默认 | 说明 |
-|---|---|---|
-| `OD_ADDR` | `:8080` | 监听地址 |
-| `OD_STORE` | `memory` | `memory` 或 `postgres` |
-| `OD_POSTGRES_DSN` | — | `OD_STORE=postgres` 时必填 |
-| `OD_NODE_ID` | `0` | Snowflake 节点 ID(0–1023),多实例时唯一 |
-
-## 代码结构
-
-```
-dev                 开发入口脚本(见「快速开始」)
-cmd/opendiscord/    入口:装配、默认 Guild 种子、READY 组装
-internal/httpapi/   REST(PROTOCOL §3)
-internal/gateway/   WebSocket 事件流(PROTOCOL §4)
-internal/auth/      注册/登录/Token
-internal/store/     存储接口 + memstore(内存)/ pgstore(PostgreSQL)
-                    storetest/ 是两者共用的一致性测试套件
-internal/voice/     LiveKit 令牌签发与房间映射(PROTOCOL §5,草图)
-internal/ids/       Snowflake ID
-web/                内嵌参考客户端(开发工具,正式客户端在 M1)
-docs/               规划与协议规范
-```
+**act 不等于 GitHub**:它用的是 `catthehacker/ubuntu:act-latest` 而非 GitHub 真正的
+`ubuntu-latest` 镜像,本机还是 arm64 而 GitHub 是 x86_64。所以这是「高保真复现」,
+不是「保证一致」。
