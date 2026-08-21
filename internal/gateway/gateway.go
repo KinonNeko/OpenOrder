@@ -8,7 +8,9 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -31,6 +33,7 @@ const (
 // Close codes (PROTOCOL §4.3).
 const (
 	CloseIdentifyTimeout = 4001
+	CloseProtocolError   = 4002
 	CloseAuthFailed      = 4004
 	CloseHeartbeatLost   = 4009
 )
@@ -49,14 +52,27 @@ type Frame struct {
 	D  json.RawMessage `json:"d,omitempty"`
 }
 
-// ReadyBuilder assembles the READY payload for a just-identified user.
-type ReadyBuilder func(ctx context.Context, u store.User) (any, error)
+// ReadyBuilder assembles the READY payload for a just-identified user and
+// reports which guilds that user belongs to. The guild set is what the hub
+// filters fan-out against (PROTOCOL §4.5), so it must come from the same
+// source as the payload -- deriving it twice invites the two to disagree.
+type ReadyBuilder func(ctx context.Context, u store.User) (payload any, guildIDs []string, err error)
 
 type session struct {
-	conn *websocket.Conn
-	user store.User
-	send chan []byte
+	conn   *websocket.Conn
+	user   store.User
+	guilds map[string]struct{}
+	send   chan []byte
+	// done is closed exactly once, by close(). The send channel is deliberately
+	// never closed: readLoop can be putting a heartbeat ACK into it at the
+	// moment another goroutine tears the session down, and closing it there
+	// would panic the whole process.
+	done chan struct{}
 	hub  *Hub
+	// seq is this connection's own dispatch counter (PROTOCOL §4.1).
+	// Guarded by hub.mu, except while the session is still unpublished during
+	// the handshake, where it is confined to the accepting goroutine.
+	seq  int64
 	once sync.Once
 }
 
@@ -66,16 +82,22 @@ type Hub struct {
 	log      *slog.Logger
 	upgrader websocket.Upgrader
 
+	// identifyTimeout and heartbeatInterval are fields, not the constants
+	// directly, so tests can compress the lifecycle into milliseconds.
+	identifyTimeout   time.Duration
+	heartbeatInterval time.Duration
+
 	mu       sync.RWMutex
 	sessions map[*session]struct{}
-	seq      int64
 }
 
 func NewHub(a *auth.Service, ready ReadyBuilder, log *slog.Logger) *Hub {
 	return &Hub{
-		auth:  a,
-		ready: ready,
-		log:   log,
+		auth:              a,
+		ready:             ready,
+		log:               log,
+		identifyTimeout:   identifyTimeout,
+		heartbeatInterval: heartbeatInterval,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
@@ -86,18 +108,31 @@ func NewHub(a *auth.Service, ready ReadyBuilder, log *slog.Logger) *Hub {
 	}
 }
 
-// Dispatch broadcasts an event to every authenticated session (PROTOCOL §4.5).
-func (h *Hub) Dispatch(event string, payload any) {
+// Dispatch broadcasts an event to every authenticated session whose user is a
+// member of guildID (PROTOCOL §4.5).
+//
+// The payload is marshalled once but the frame is built per session, because
+// `s` is per-connection (PROTOCOL §4.1) -- a global counter would show every
+// client gaps it cannot distinguish from lost events.
+func (h *Hub) Dispatch(guildID, event string, payload any) {
 	d, err := json.Marshal(payload)
 	if err != nil {
 		h.log.Error("gateway: marshal dispatch", "event", event, "err", err)
 		return
 	}
 	h.mu.Lock()
-	h.seq++
-	s := h.seq
-	frame, _ := json.Marshal(Frame{Op: OpDispatch, T: event, S: &s, D: d})
+	defer h.mu.Unlock()
 	for sess := range h.sessions {
+		if _, ok := sess.guilds[guildID]; !ok {
+			continue
+		}
+		sess.seq++
+		n := sess.seq
+		frame, err := json.Marshal(Frame{Op: OpDispatch, T: event, S: &n, D: d})
+		if err != nil {
+			h.log.Error("gateway: marshal frame", "event", event, "err", err)
+			continue
+		}
 		select {
 		case sess.send <- frame:
 		default:
@@ -105,7 +140,6 @@ func (h *Hub) Dispatch(event string, payload any) {
 			go sess.close(websocket.CloseGoingAway, "send buffer overflow")
 		}
 	}
-	h.mu.Unlock()
 }
 
 func (h *Hub) Online() int {
@@ -120,19 +154,34 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	sess := &session{conn: conn, send: make(chan []byte, sendBuffer), hub: h}
+	sess := &session{
+		conn: conn,
+		send: make(chan []byte, sendBuffer),
+		done: make(chan struct{}),
+		hub:  h,
+	}
 
-	hello, _ := json.Marshal(map[string]any{"heartbeat_interval_ms": heartbeatInterval.Milliseconds()})
+	hello, _ := json.Marshal(map[string]any{"heartbeat_interval_ms": h.heartbeatInterval.Milliseconds()})
 	if err := sess.writeFrame(Frame{Op: OpHello, D: hello}); err != nil {
 		conn.Close()
 		return
 	}
 
-	// Await IDENTIFY.
-	conn.SetReadDeadline(time.Now().Add(identifyTimeout))
+	// Await IDENTIFY. 4001 means "you never sent it", 4002 means "you sent
+	// something else" -- the client's response differs (PROTOCOL §4.3).
+	conn.SetReadDeadline(time.Now().Add(h.identifyTimeout))
 	var f Frame
-	if err := conn.ReadJSON(&f); err != nil || f.Op != OpIdentify {
-		sess.close(CloseIdentifyTimeout, "expected IDENTIFY")
+	if err := conn.ReadJSON(&f); err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			sess.close(CloseIdentifyTimeout, "no IDENTIFY within timeout")
+		} else {
+			sess.close(CloseProtocolError, "malformed frame")
+		}
+		return
+	}
+	if f.Op != OpIdentify {
+		sess.close(CloseProtocolError, "expected IDENTIFY")
 		return
 	}
 	var ident struct {
@@ -146,18 +195,24 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.user = user
 
-	readyPayload, err := h.ready(r.Context(), user)
+	readyPayload, guildIDs, err := h.ready(r.Context(), user)
 	if err != nil {
 		sess.close(websocket.CloseInternalServerErr, "ready failed")
 		return
 	}
+	sess.guilds = make(map[string]struct{}, len(guildIDs))
+	for _, id := range guildIDs {
+		sess.guilds[id] = struct{}{}
+	}
 	d, _ := json.Marshal(readyPayload)
+	// READY is frame 1 of this connection (PROTOCOL §4.1). Numbering it before
+	// publishing the session keeps `s` gapless: no dispatch can slip in first.
+	sess.seq = 1
+	n := sess.seq
 	h.mu.Lock()
-	h.seq++
-	s := h.seq
 	h.sessions[sess] = struct{}{}
 	h.mu.Unlock()
-	if err := sess.writeFrame(Frame{Op: OpDispatch, T: "READY", S: &s, D: d}); err != nil {
+	if err := sess.writeFrame(Frame{Op: OpDispatch, T: "READY", S: &n, D: d}); err != nil {
 		sess.close(websocket.CloseGoingAway, "write failed")
 		return
 	}
@@ -177,18 +232,24 @@ func (s *session) writeFrame(f Frame) error {
 }
 
 func (s *session) writeLoop() {
-	for b := range s.send {
-		s.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-		if err := s.conn.WriteMessage(websocket.TextMessage, b); err != nil {
-			s.close(websocket.CloseGoingAway, "write failed")
+	for {
+		select {
+		case <-s.done:
 			return
+		case b := <-s.send:
+			s.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := s.conn.WriteMessage(websocket.TextMessage, b); err != nil {
+				s.close(websocket.CloseGoingAway, "write failed")
+				return
+			}
 		}
 	}
 }
 
 func (s *session) readLoop() {
 	// Allow two missed heartbeats (PROTOCOL §4.3).
-	deadline := func() { s.conn.SetReadDeadline(time.Now().Add(2*heartbeatInterval + 5*time.Second)) }
+	hb := s.hub.heartbeatInterval
+	deadline := func() { s.conn.SetReadDeadline(time.Now().Add(2*hb + 5*time.Second)) }
 	deadline()
 	for {
 		var f Frame
@@ -197,10 +258,15 @@ func (s *session) readLoop() {
 			return
 		}
 		if f.Op == OpHeartbeat {
+			// f.D carries the client's highest received `s`. v0 accepts but
+			// does not use it; it is the replay cursor RESUME will need
+			// (PROTOCOL §4.2).
 			deadline()
 			ack, _ := json.Marshal(Frame{Op: OpHeartbeatACK})
 			select {
 			case s.send <- ack:
+			case <-s.done:
+				return
 			default:
 			}
 		}
@@ -213,10 +279,10 @@ func (s *session) close(code int, reason string) {
 		s.hub.mu.Lock()
 		delete(s.hub.sessions, s)
 		s.hub.mu.Unlock()
+		close(s.done)
 		msg := websocket.FormatCloseMessage(code, reason)
 		s.conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
 		s.conn.Close()
-		close(s.send)
 		if s.user.ID != "" {
 			s.hub.log.Info("gateway: session closed", "user", s.user.Username, "online", s.hub.Online())
 		}

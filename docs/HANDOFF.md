@@ -1,7 +1,7 @@
 # 交接文档(→ 下一个会话)
 
 > 目的:让一个全新会话(无本会话上下文)无缝接管 OpenDiscord 开发。
-> 最后更新:2026-08-21,LiveKit 集成验证完成时。
+> 最后更新:2026-08-21,LiveKit 集成验证 + 六项协议/实现不一致修复完成时。
 
 ## 一、项目是什么
 
@@ -85,43 +85,65 @@ go run ./cmd/opendiscord        # 内存存储,:8080,开两个浏览器注册两
 PG 模式:`OD_STORE=postgres OD_POSTGRES_DSN='postgres://…' go run ./cmd/opendiscord`。
 环境变量表在 README.md。
 
-## 五、待决策(接手后请先跟维护者过一遍)
+## 五、已定的协议决策(2026-08-21,六项一次性补齐)
 
-上一会话交接时未记录、本次通读文档与代码时发现的**文档与实现不一致**。
-按严重度排,前两条建议优先处理:
+上一版本 HANDOFF 在此列了六项「文档与实现不一致」待决策。**已全部修复并验证**,
+决策与理由记录如下 —— 它们都写进了 PROTOCOL.md,这里只解释「为什么这样选」。
 
-1. **`internal/gateway` 有 send-on-closed-channel 竞态(会 panic 整个进程)** ——
-   `session.close()` 关闭 `s.send`,而 `readLoop` 里回心跳 ACK 的
-   `select { case s.send <- ack: default: }` 不在任何锁内。`close()` 可由 writeLoop
-   (写失败)或 `Dispatch` 的 `go sess.close(...)`(慢消费者)触发,与该发送并发。
-   `Dispatch` 自身那条路径是安全的(持 `h.mu`、先摘表后关 channel),**只有 ACK 这条漏了**。
-   修法:让 close 只标记状态、由 writeLoop 唯一负责 `close(s.send)`;或给 send 加读写锁保护。
-2. **Gateway 的 `s` 是 hub 级全局计数器,且每个 READY 都消耗它** ——
-   于是任一会话看到的 `s` 天然带空洞。协议 §4.1 说 `s` 是「为 M1 断线重放预留」,
-   但按当前语义无法用于重放。**动 `RESUME` 之前必须先在协议里拍板**:per-session 序号,
-   还是全局序号 + 重放缓冲区?同时 §4.2 定义的 HEARTBEAT `d`(客户端已收到的最大 `s`)
-   当前被服务端完全丢弃 —— 它正是 RESUME 的钩子,一并决策。
-3. **`GET /guilds` 语义与实现不符** —— 协议 §3 写「当前用户所在 Guild 列表」,
-   实现(`api.go` `handleGuilds` 与 `main.go` `readyBuilder`)调 `store.Guilds(ctx)`,
-   无成员过滤,`Store.Guilds` 签名里也没有 user 参数。v0 单 Guild + 全员自动加入下
-   结果碰巧相同,但**成员关系这个概念在数据模型里根本不存在**,M1 权限系统必然撞上。
-4. **实际错误码未登记进协议**(违反「协议先于实现」铁律)—— 代码会返回
-   `username_taken`(409)、`invalid_credentials`(401)、`channel_not_found`(404),
-   §1.5 一个都没列;反过来 §1.5 登记的 `not_found`、`forbidden` 代码里从未使用。
-   建议:补进 §1.5,并约定「新错误码必须先进协议」。
-5. **关闭码 4001 被复用** —— §4.3 只定义 4001 = HELLO 后 10 秒未 IDENTIFY;
-   实现在「首帧不是 IDENTIFY」和「JSON 解析失败」时也发 4001,未登记。
-6. **`limit` 非法值静默回落** —— `?limit=0`、`?limit=abc`、`?limit=999` 都静默变成 50,
-   而非 `validation_failed`,§3 未说明该行为。
+1. **gateway send-on-closed-channel 竞态(会 panic 整个进程)** —— 已修。
+   `close()` 不再关闭 `s.send`,改为关闭新增的 `done` channel;`writeLoop` 用
+   `select` 在 `done` 与 `send` 之间退出,`readLoop` 的心跳 ACK 也加了 `done` 分支。
+   `send` **刻意永不关闭**:readLoop 可能正在往里投 ACK,在别处关它就是那个 panic。
+   回归测试 `TestCloseLeavesSendChannelOpen` 直接断言这条不变式 —— 把 `close(s.send)`
+   加回去,它每次都 panic;早先写的并发洪泛测试反而抓不到(窗口太窄),已换掉。
+
+2. **`s` 序号语义 → 每连接独立、从 1 起、连续无空洞**(PROTOCOL §4.1)。
+   没选「全局序号 + 重放缓冲」,因为 §4.5 规定 M1 起事件按频道权限过滤,届时全局
+   序号会让**每个**客户端都看到大量空洞,「序号跳变 = 丢帧」这个判据就废了。
+   每连接编号是唯一能在权限过滤下存活的方案,也是 `RESUME` 能按序号重放的前提。
+   代价:每个会话单独封帧(载荷只序列化一次)。HEARTBEAT 的 `d` 现在是**接受但不使用**,
+   协议已明写 —— 它是 M1 `RESUME` 的重放起点,客户端必须从现在起就正确填写。
+
+3. **成员关系 → 显式存储**(PROTOCOL §2)。新增 `guild_members` 表 /
+   `Store.AddGuildMember` / `Store.GuildsByUser`;注册时自动加入当时已存在的全部 Guild。
+   `GET /guilds`、READY、Gateway 扇出**都按成员关系过滤**(`Dispatch` 现在带 guild 参数)。
+   没有选「改协议措辞去迁就实现」,因为 M1 的角色/权限必须挂在成员关系上 ——
+   留到那时再补,等于让权限系统先建在一个不存在的实体上。
+   pgstore 的 `schema.sql` 里有一段**一次性回填**,给 M0 时期注册、没有成员行的老账号补上;
+   **M1 做「退出 Guild」时必须删掉它**,否则每次启动都会把退出的人加回来(注释已写在 SQL 旁)。
+
+4. **错误码 → §1.5 改为全集注册表**,并写死「服务端不得返回未登记的 `code`,
+   新增错误码必须先改协议」。补登了 `username_taken` / `invalid_credentials` /
+   `channel_not_found`;`not_found` / `forbidden` 标注为预留。
+   `invalid_credentials` 与 `unauthorized` 刻意都用 401 但分开:前者「重填表单」,
+   后者「清 Token 回登录页」,合并会让客户端无法区分处置。
+
+5. **关闭码 4002 = 协议错误**,从 4001 拆出(PROTOCOL §4.3)。4001 只表示
+   「没来得及发 IDENTIFY」(重连有用),4002 表示「发错了」(重连只会再撞一次)。
+
+6. **`limit` 非法值 → `validation_failed`**,不再静默回落(PROTOCOL §3)。
+   静默回落会把分页 Bug 表现成「少了几条消息」,而不是一个明确的失败。
+
+### 本次新增的测试(此前全项目只有 voice 的 8 个)
+
+| 包 | 覆盖 |
+|---|---|
+| `internal/gateway` | 握手、每连接序号、成员过滤扇出、4001/4002/4004、心跳 ACK、竞态回归 |
+| `internal/httpapi` | 成员过滤、错误码注册表(12 例)、`limit` 校验、默认分页 |
+| `internal/store/storetest` | **一套用例,memstore 与 pgstore 共跑** —— 两者可互换是设计前提,只有共用测试能保住 |
+
+`go test ./...` 在无 PostgreSQL / 无 LiveKit 的机器上全绿(相关用例自动 skip)。
+本次已用真实 PostgreSQL 跑通 store 一致性测试,并用一个端到端程序驱动真实服务器
+验证了全部六项(含回填:删空 `guild_members` → 重启 → 成员关系恢复)。
 
 ## 六、下一步(按优先级)
 
-1. **修 §五 第 1 条的 gateway 竞态**,并补 gateway 生命周期的单元测试(现在有测试基建了)
-2. **M1 开工**(PLANNING §3.3):权限/角色(allow/deny 位掩码,进协议)、线程、
+1. **CI**:build / vet / `go test -race ./...`。现在有真测试了,没有 CI 是最大的欠账
+2. **M1 开工**(PLANNING §3.3):权限/角色(allow/deny 位掩码,先进协议)、线程、
    Reaction、未读同步、`MESSAGE_UPDATE/DELETE`、`TYPING_START`、`PRESENCE_UPDATE`。
-   开工前先定 §五 第 2、3 条(序号语义、成员关系模型),两者都会被 M1 直接依赖
-3. **工程化补课**:CI(build/vet/test);store 接口双实现一致性测试
-   (`memstore` / `pgstore` 跑同一组用例);gateway 断线重放(`RESUME`)
+   §五 第 2、3 条已为它铺好路(序号语义、成员关系),可直接开工
+3. **`RESUME`**(PROTOCOL §4.3 已承诺 M1 加入):每连接重放缓冲 + HEARTBEAT `d`
+   作为重放起点。序号语义已定,剩下的是缓冲区大小与失效策略
 4. 装 Docker 后跑一次 `docker compose up --build` 验证整体;compose 里加 livekit 服务
 5. M2 语音接线:按 PROTOCOL §5 实现 REST/Webhook/`VOICE_STATE_UPDATE`,
    先答 §5.6 的三个待定问题

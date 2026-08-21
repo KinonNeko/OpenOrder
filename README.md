@@ -38,12 +38,17 @@ docker compose up --build
 ## 测试
 
 ```sh
-go test ./...
+go test -race ./...
 ```
 
-`internal/voice` 的一致性测试需要一个本地 LiveKit 才会真正执行,否则自动 skip:
+需要外部服务的用例在缺少对应环境变量时自动 skip,所以上面这条命令在一台
+只有 Go 的机器上也是全绿的。要真正跑它们:
 
 ```sh
+# store 双实现一致性(memstore 与 pgstore 跑同一套用例)
+OD_TEST_POSTGRES_DSN='postgres://…?sslmode=disable' go test ./internal/store/...
+
+# LiveKit 令牌与入房一致性
 livekit-server --dev --bind 127.0.0.1
 OD_TEST_LIVEKIT_URL=http://127.0.0.1:7880 \
 OD_TEST_LIVEKIT_KEY=devkey OD_TEST_LIVEKIT_SECRET=secret go test ./internal/voice
@@ -66,6 +71,7 @@ internal/httpapi/   REST(PROTOCOL §3)
 internal/gateway/   WebSocket 事件流(PROTOCOL §4)
 internal/auth/      注册/登录/Token
 internal/store/     存储接口 + memstore(内存)/ pgstore(PostgreSQL)
+                    storetest/ 是两者共用的一致性测试套件
 internal/voice/     LiveKit 令牌签发与房间映射(PROTOCOL §5,草图)
 internal/ids/       Snowflake ID
 web/                内嵌参考客户端(开发工具,正式客户端在 M1)

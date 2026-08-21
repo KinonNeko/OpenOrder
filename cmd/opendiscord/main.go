@@ -112,29 +112,32 @@ func seedDefaultGuild(ctx context.Context, st store.Store, gen *ids.Generator) e
 	})
 }
 
-// readyBuilder assembles the READY payload: user + guilds with embedded
-// channels (PROTOCOL §4.4).
+// readyBuilder assembles the READY payload -- user + the guilds this user
+// belongs to, with embedded channels (PROTOCOL §4.4) -- and returns those
+// guild IDs for the hub to filter fan-out with (PROTOCOL §4.5).
 func readyBuilder(st store.Store) gateway.ReadyBuilder {
 	type guildWithChannels struct {
 		store.Guild
 		Channels []store.Channel `json:"channels"`
 	}
-	return func(ctx context.Context, u store.User) (any, error) {
-		guilds, err := st.Guilds(ctx)
+	return func(ctx context.Context, u store.User) (any, []string, error) {
+		guilds, err := st.GuildsByUser(ctx, u.ID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		out := make([]guildWithChannels, 0, len(guilds))
+		ids := make([]string, 0, len(guilds))
 		for _, g := range guilds {
 			chans, err := st.ChannelsByGuild(ctx, g.ID)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if chans == nil {
 				chans = []store.Channel{}
 			}
 			out = append(out, guildWithChannels{Guild: g, Channels: chans})
+			ids = append(ids, g.ID)
 		}
-		return map[string]any{"user": u, "guilds": out}, nil
+		return map[string]any{"user": u, "guilds": out}, ids, nil
 	}
 }

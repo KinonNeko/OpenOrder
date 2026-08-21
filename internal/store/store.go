@@ -66,9 +66,18 @@ type Store interface {
 	CreateToken(ctx context.Context, token, userID string) error
 	UserIDByToken(ctx context.Context, token string) (string, error)
 
-	// Guilds. v0: one default guild, everyone is a member (PROTOCOL §2).
+	// Guilds.
 	CreateGuild(ctx context.Context, g Guild) error
+	// Guilds lists every guild on the instance, ascending by ID. It is the
+	// instance-wide view used at startup and at registration; user-facing
+	// listings must use GuildsByUser.
 	Guilds(ctx context.Context) ([]Guild, error)
+
+	// Membership is an explicit relation, not the implicit rule "everyone is in
+	// everything" (PROTOCOL §2): M1 hangs roles and permissions off it.
+	// AddGuildMember is idempotent.
+	AddGuildMember(ctx context.Context, guildID, userID string) error
+	GuildsByUser(ctx context.Context, userID string) ([]Guild, error)
 
 	// Channels.
 	CreateChannel(ctx context.Context, c Channel) error

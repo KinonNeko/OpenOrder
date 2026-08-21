@@ -24,6 +24,26 @@ CREATE TABLE IF NOT EXISTS guilds (
     created_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS guild_members (
+    guild_id  BIGINT NOT NULL REFERENCES guilds (id) ON DELETE CASCADE,
+    user_id   BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (guild_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS guild_members_user ON guild_members (user_id);
+
+-- v0 transitional backfill. Membership became an explicit relation after M0
+-- shipped, so accounts registered before this table exists have no rows and
+-- would see an empty guild list. PROTOCOL §2 states that in v0 every user is a
+-- member of every guild, which makes this statement precisely the documented
+-- rule rather than a guess.
+--
+-- DELETE THIS when leaving a guild becomes possible (M1): it runs on every
+-- startup, so it would silently re-add anyone who left.
+INSERT INTO guild_members (guild_id, user_id)
+SELECT g.id, u.id FROM guilds g CROSS JOIN users u
+ON CONFLICT DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS channels (
     id         BIGINT PRIMARY KEY,
     guild_id   BIGINT NOT NULL REFERENCES guilds (id) ON DELETE CASCADE,

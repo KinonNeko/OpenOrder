@@ -120,8 +120,29 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		a.internal(w, "register", err)
 	default:
+		if err := a.joinAllGuilds(r.Context(), u.ID); err != nil {
+			a.internal(w, "register_join", err)
+			return
+		}
 		writeJSON(w, http.StatusCreated, authResponse{User: u, Token: token})
 	}
+}
+
+// joinAllGuilds implements the v0 rule that registration joins every guild
+// that exists at the time (PROTOCOL §2). It lives here rather than in
+// auth.Service because membership is guild state, not credential state; M1
+// replaces it with invites.
+func (a *API) joinAllGuilds(ctx context.Context, userID string) error {
+	guilds, err := a.store.Guilds(ctx)
+	if err != nil {
+		return err
+	}
+	for _, g := range guilds {
+		if err := a.store.AddGuildMember(ctx, g.ID, userID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -153,10 +174,13 @@ func (a *API) handleGatewayURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleGuilds(w http.ResponseWriter, r *http.Request) {
-	guilds, err := a.store.Guilds(r.Context())
+	guilds, err := a.store.GuildsByUser(r.Context(), currentUser(r).ID)
 	if err != nil {
 		a.internal(w, "guilds", err)
 		return
+	}
+	if guilds == nil {
+		guilds = []store.Guild{}
 	}
 	writeJSON(w, http.StatusOK, guilds)
 }
@@ -203,7 +227,7 @@ func (a *API) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		a.internal(w, "create_channel", err)
 		return
 	}
-	a.hub.Dispatch("CHANNEL_CREATE", ch)
+	a.hub.Dispatch(ch.GuildID, "CHANNEL_CREATE", ch)
 	writeJSON(w, http.StatusCreated, ch)
 }
 
@@ -213,11 +237,16 @@ func (a *API) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "channel_not_found", "channel does not exist")
 		return
 	}
+	// An out-of-range limit is an error, not a silent fallback (PROTOCOL §3):
+	// falling back turns a paging bug into "a few messages went missing".
 	limit := 50
 	if s := r.URL.Query().Get("limit"); s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n >= 1 && n <= 100 {
-			limit = n
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 || n > 100 {
+			writeErr(w, http.StatusBadRequest, "validation_failed", "limit must be an integer in 1-100")
+			return
 		}
+		limit = n
 	}
 	msgs, err := a.store.MessagesByChannel(r.Context(), channelID, r.URL.Query().Get("before"), limit)
 	if err != nil {
@@ -232,7 +261,8 @@ func (a *API) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 	channelID := r.PathValue("channel_id")
-	if _, err := a.store.ChannelByID(r.Context(), channelID); err != nil {
+	ch, err := a.store.ChannelByID(r.Context(), channelID)
+	if err != nil {
 		writeErr(w, http.StatusNotFound, "channel_not_found", "channel does not exist")
 		return
 	}
@@ -258,6 +288,6 @@ func (a *API) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 		a.internal(w, "create_message", err)
 		return
 	}
-	a.hub.Dispatch("MESSAGE_CREATE", msg)
+	a.hub.Dispatch(ch.GuildID, "MESSAGE_CREATE", msg)
 	writeJSON(w, http.StatusCreated, msg)
 }

@@ -94,7 +94,11 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const state = { token: null, user: null, guild: null, channels: [], current: null, ws: null, hb: null };
+const state = { token: null, user: null, guild: null, channels: [], current: null, ws: null, hb: null, seq: null };
+
+// Close codes that must not be retried -- reconnecting would hit the same wall
+// (PROTOCOL §4.3).
+const FATAL_CLOSE = { 4002: "protocol error (client bug)", 4004: "token rejected" };
 
 const api = async (method, path, body) => {
   const res = await fetch("/api/v0" + path, {
@@ -154,25 +158,50 @@ async function connect() {
   const { url } = await api("GET", "/gateway");
   const ws = new WebSocket(url);
   state.ws = ws;
+  state.seq = null; // `s` restarts at 1 on every connection (PROTOCOL §4.1)
   ws.onmessage = (e) => {
     const f = JSON.parse(e.data);
     if (f.op === 10) {
       ws.send(JSON.stringify({ op: 2, d: { token: state.token } }));
       clearInterval(state.hb);
       state.hb = setInterval(
-        () => ws.readyState === 1 && ws.send(JSON.stringify({ op: 1, d: null })),
+        () => ws.readyState === 1 && ws.send(JSON.stringify({ op: 1, d: state.seq })),
         f.d.heartbeat_interval_ms,
       );
     } else if (f.op === 0) {
+      // `s` is gapless within a connection, so a jump means we dropped a frame.
+      // v0 has no RESUME; surfacing it is the point of the reference client.
+      if (state.seq !== null && f.s !== state.seq + 1) {
+        console.warn(`gateway: sequence gap ${state.seq} -> ${f.s}`);
+      }
+      state.seq = f.s;
       onDispatch(f.t, f.d);
     }
   };
   ws.onopen = () => { $("conn").textContent = "online"; $("conn").className = "up"; };
-  ws.onclose = () => {
-    $("conn").textContent = "reconnecting…"; $("conn").className = "";
+  ws.onclose = (e) => {
     clearInterval(state.hb);
+    $("conn").className = "";
+    const fatal = FATAL_CLOSE[e.code];
+    if (fatal) {
+      $("conn").textContent = `disconnected: ${fatal} (${e.code})`;
+      if (e.code === 4004) signOut();
+      return;
+    }
+    $("conn").textContent = e.code ? `reconnecting… (${e.code})` : "reconnecting…";
     setTimeout(() => state.token && connect(), 2000);
   };
+}
+
+// signOut drops the credential and returns to the login form, which is what
+// close code 4004 (and a 401 `unauthorized`) mean the client should do.
+function signOut() {
+  sessionStorage.removeItem("od_token");
+  state.token = null;
+  state.user = null;
+  $("app").style.display = "none";
+  $("auth").style.display = "";
+  $("authErr").textContent = "Session expired, please sign in again.";
 }
 
 function onDispatch(t, d) {

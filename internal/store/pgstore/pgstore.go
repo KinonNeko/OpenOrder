@@ -108,8 +108,11 @@ func (p *PG) CreateGuild(ctx context.Context, g store.Guild) error {
 }
 
 func (p *PG) Guilds(ctx context.Context) ([]store.Guild, error) {
-	rows, err := p.db.QueryContext(ctx,
-		`SELECT id, name, owner_id, created_at FROM guilds ORDER BY id`)
+	return p.scanGuilds(ctx, `SELECT id, name, owner_id, created_at FROM guilds ORDER BY id`)
+}
+
+func (p *PG) scanGuilds(ctx context.Context, q string, args ...any) ([]store.Guild, error) {
+	rows, err := p.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +128,20 @@ func (p *PG) Guilds(ctx context.Context) ([]store.Guild, error) {
 		out = append(out, g)
 	}
 	return out, rows.Err()
+}
+
+func (p *PG) AddGuildMember(ctx context.Context, guildID, userID string) error {
+	_, err := p.db.ExecContext(ctx,
+		`INSERT INTO guild_members (guild_id, user_id) VALUES ($1,$2)
+		 ON CONFLICT DO NOTHING`, toI64(guildID), toI64(userID))
+	return err
+}
+
+func (p *PG) GuildsByUser(ctx context.Context, userID string) ([]store.Guild, error) {
+	return p.scanGuilds(ctx,
+		`SELECT g.id, g.name, g.owner_id, g.created_at
+		 FROM guilds g JOIN guild_members m ON m.guild_id = g.id
+		 WHERE m.user_id = $1 ORDER BY g.id`, toI64(userID))
 }
 
 func (p *PG) CreateChannel(ctx context.Context, c store.Channel) error {

@@ -17,6 +17,7 @@ type Mem struct {
 	byName   map[string]string     // lower(username) -> ID
 	tokens   map[string]string     // token -> userID
 	guilds   map[string]store.Guild
+	members  map[string]map[string]struct{} // guildID -> set of userID
 	channels map[string]store.Channel
 	messages map[string][]store.Message // channelID -> ascending by ID
 }
@@ -27,6 +28,7 @@ func New() *Mem {
 		byName:   map[string]string{},
 		tokens:   map[string]string{},
 		guilds:   map[string]store.Guild{},
+		members:  map[string]map[string]struct{}{},
 		channels: map[string]store.Channel{},
 		messages: map[string][]store.Message{},
 	}
@@ -95,7 +97,33 @@ func (m *Mem) Guilds(_ context.Context) ([]store.Guild, error) {
 	for _, g := range m.guilds {
 		out = append(out, g)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	sort.Slice(out, func(i, j int) bool { return idLess(out[i].ID, out[j].ID) })
+	return out, nil
+}
+
+func (m *Mem) AddGuildMember(_ context.Context, guildID, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.guilds[guildID]; !ok {
+		return store.ErrNotFound
+	}
+	if m.members[guildID] == nil {
+		m.members[guildID] = map[string]struct{}{}
+	}
+	m.members[guildID][userID] = struct{}{}
+	return nil
+}
+
+func (m *Mem) GuildsByUser(_ context.Context, userID string) ([]store.Guild, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]store.Guild, 0, len(m.guilds))
+	for id, g := range m.guilds {
+		if _, ok := m.members[id][userID]; ok {
+			out = append(out, g)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return idLess(out[i].ID, out[j].ID) })
 	return out, nil
 }
 
@@ -129,7 +157,7 @@ func (m *Mem) ChannelsByGuild(_ context.Context, guildID string) ([]store.Channe
 		if out[i].Position != out[j].Position {
 			return out[i].Position < out[j].Position
 		}
-		return out[i].ID < out[j].ID
+		return idLess(out[i].ID, out[j].ID)
 	})
 	return out, nil
 }
