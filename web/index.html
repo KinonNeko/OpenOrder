@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenDiscord</title>
+<style>
+  :root {
+    --bg: #14181b; --panel: #1c2227; --panel-2: #232b31; --line: #2e383f;
+    --ink: #e8edf0; --ink-soft: #93a3ad; --accent: #2fbfae; --accent-ink: #0e1214;
+    --danger: #e5685d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 -apple-system, "Segoe UI", "Helvetica Neue", "PingFang SC", sans-serif;
+    height: 100vh; overflow: hidden;
+  }
+  button {
+    background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 6px;
+    padding: 8px 16px; font-weight: 600; font-size: 14px; cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--ink-soft); }
+  input {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+    color: var(--ink); padding: 9px 12px; font-size: 14px; width: 100%;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+  /* auth screen */
+  #auth { display: grid; place-items: center; height: 100vh; }
+  #auth form {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 32px; width: 320px; display: grid; gap: 10px;
+  }
+  #auth h1 { font-size: 20px; margin: 0 0 6px; }
+  #auth .err { color: var(--danger); font-size: 13px; min-height: 1.2em; margin: 0; }
+
+  /* app shell */
+  #app { display: none; grid-template-columns: 220px 1fr; height: 100vh; }
+  aside { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+  aside .guild { padding: 14px 16px; font-weight: 700; border-bottom: 1px solid var(--line); }
+  #channels { flex: 1; overflow-y: auto; padding: 8px; }
+  #channels button {
+    display: block; width: 100%; text-align: left; background: transparent;
+    color: var(--ink-soft); font-weight: 500; padding: 6px 10px; border-radius: 6px;
+  }
+  #channels button.active { background: var(--panel-2); color: var(--ink); }
+  aside .me {
+    padding: 10px 16px; border-top: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: center; font-size: 13px;
+  }
+  #conn { color: var(--ink-soft); font-size: 12px; }
+  #conn.up { color: var(--accent); }
+
+  main { display: flex; flex-direction: column; min-width: 0; }
+  main header { padding: 13px 20px; border-bottom: 1px solid var(--line); font-weight: 700; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
+  .msg .head { display: flex; gap: 10px; align-items: baseline; }
+  .msg .who { font-weight: 700; color: var(--accent); }
+  .msg .when { color: var(--ink-soft); font-size: 12px; }
+  .msg .body { white-space: pre-wrap; word-break: break-word; }
+  #composer { display: flex; gap: 10px; padding: 14px 20px 18px; }
+</style>
+</head>
+<body>
+
+<div id="auth">
+  <form id="authForm">
+    <h1>OpenDiscord</h1>
+    <input id="username" placeholder="Username" autocomplete="username" required>
+    <input id="password" type="password" placeholder="Password (8+ chars)" autocomplete="current-password" required>
+    <p class="err" id="authErr"></p>
+    <button type="submit" data-mode="login">Log in</button>
+    <button type="submit" class="ghost" data-mode="register">Create account</button>
+  </form>
+</div>
+
+<div id="app">
+  <aside>
+    <div class="guild" id="guildName">—</div>
+    <nav id="channels"></nav>
+    <div class="me"><span id="meName"></span><span id="conn">offline</span></div>
+  </aside>
+  <main>
+    <header id="channelName">—</header>
+    <div id="messages"></div>
+    <form id="composer">
+      <input id="composeInput" placeholder="Message…" autocomplete="off" maxlength="4000">
+      <button type="submit">Send</button>
+    </form>
+  </main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { token: null, user: null, guild: null, channels: [], current: null, ws: null, hb: null };
+
+const api = async (method, path, body) => {
+  const res = await fetch("/api/v0" + path, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      ...(state.token ? { Authorization: "Bearer " + state.token } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = res.status === 204 ? null : await res.json();
+  if (!res.ok) throw new Error(data?.message || res.statusText);
+  return data;
+};
+
+// ---- auth ----
+$("authForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const mode = e.submitter?.dataset.mode || "login";
+  $("authErr").textContent = "";
+  try {
+    const { user, token } = await api("POST", "/auth/" + mode, {
+      username: $("username").value.trim(),
+      password: $("password").value,
+    });
+    state.token = token;
+    state.user = user;
+    sessionStorage.setItem("od_token", token);
+    enterApp();
+  } catch (err) {
+    $("authErr").textContent = err.message;
+  }
+});
+
+async function tryResume() {
+  const token = sessionStorage.getItem("od_token");
+  if (!token) return;
+  state.token = token;
+  try {
+    state.user = await api("GET", "/users/@me");
+    enterApp();
+  } catch {
+    sessionStorage.removeItem("od_token");
+    state.token = null;
+  }
+}
+
+function enterApp() {
+  $("auth").style.display = "none";
+  $("app").style.display = "grid";
+  $("meName").textContent = state.user.display_name;
+  connect();
+}
+
+// ---- gateway ----
+async function connect() {
+  const { url } = await api("GET", "/gateway");
+  const ws = new WebSocket(url);
+  state.ws = ws;
+  ws.onmessage = (e) => {
+    const f = JSON.parse(e.data);
+    if (f.op === 10) {
+      ws.send(JSON.stringify({ op: 2, d: { token: state.token } }));
+      clearInterval(state.hb);
+      state.hb = setInterval(
+        () => ws.readyState === 1 && ws.send(JSON.stringify({ op: 1, d: null })),
+        f.d.heartbeat_interval_ms,
+      );
+    } else if (f.op === 0) {
+      onDispatch(f.t, f.d);
+    }
+  };
+  ws.onopen = () => { $("conn").textContent = "online"; $("conn").className = "up"; };
+  ws.onclose = () => {
+    $("conn").textContent = "reconnecting…"; $("conn").className = "";
+    clearInterval(state.hb);
+    setTimeout(() => state.token && connect(), 2000);
+  };
+}
+
+function onDispatch(t, d) {
+  if (t === "READY") {
+    state.guild = d.guilds[0];
+    state.channels = state.guild.channels;
+    $("guildName").textContent = state.guild.name;
+    renderChannels();
+    if (!state.current || !state.channels.some((c) => c.id === state.current.id)) {
+      selectChannel(state.channels[0]);
+    } else {
+      selectChannel(state.channels.find((c) => c.id === state.current.id)); // refill after reconnect
+    }
+  } else if (t === "MESSAGE_CREATE") {
+    if (state.current && d.channel_id === state.current.id) appendMessage(d);
+  } else if (t === "CHANNEL_CREATE") {
+    state.channels.push(d);
+    renderChannels();
+  }
+}
+
+// ---- channels & messages ----
+function renderChannels() {
+  const nav = $("channels");
+  nav.innerHTML = "";
+  for (const c of state.channels) {
+    const b = document.createElement("button");
+    b.textContent = "# " + c.name;
+    b.className = state.current?.id === c.id ? "active" : "";
+    b.onclick = () => selectChannel(c);
+    nav.appendChild(b);
+  }
+}
+
+async function selectChannel(c) {
+  if (!c) return;
+  state.current = c;
+  $("channelName").textContent = "# " + c.name;
+  renderChannels();
+  const msgs = await api("GET", `/channels/${c.id}/messages?limit=50`);
+  $("messages").innerHTML = "";
+  for (const m of msgs.reverse()) appendMessage(m);
+}
+
+function appendMessage(m) {
+  const el = document.createElement("div");
+  el.className = "msg";
+  const head = document.createElement("div");
+  head.className = "head";
+  const who = document.createElement("span");
+  who.className = "who";
+  who.textContent = m.author.display_name;
+  const when = document.createElement("span");
+  when.className = "when";
+  when.textContent = new Date(m.created_at).toLocaleTimeString();
+  head.append(who, when);
+  const body = document.createElement("div");
+  body.className = "body";
+  body.textContent = m.content;
+  el.append(head, body);
+  const box = $("messages");
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+}
+
+$("composer").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const content = $("composeInput").value.trim();
+  if (!content || !state.current) return;
+  $("composeInput").value = "";
+  try {
+    await api("POST", `/channels/${state.current.id}/messages`, { content });
+  } catch (err) {
+    appendMessage({
+      author: { display_name: "system" },
+      created_at: new Date().toISOString(),
+      content: "send failed: " + err.message,
+    });
+  }
+});
+
+tryResume();
+</script>
+</body>
+</html>

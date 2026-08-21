@@ -1,0 +1,48 @@
+# OpenDiscord single-node deployment (PLANNING.md: PG + Redis + MinIO, nothing else).
+# Redis and MinIO are not consumed by the v0 code path yet; they are part of the
+# committed dependency envelope (M1: presence/fan-out; M1: attachments).
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      OD_ADDR: ":8080"
+      OD_STORE: postgres
+      OD_POSTGRES_DSN: postgres://opendiscord:opendiscord@postgres:5432/opendiscord?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: opendiscord
+      POSTGRES_PASSWORD: opendiscord
+      POSTGRES_DB: opendiscord
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opendiscord"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8-alpine
+    volumes:
+      - redisdata:/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: opendiscord
+      MINIO_ROOT_PASSWORD: opendiscord
+    volumes:
+      - miniodata:/data
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

@@ -1,0 +1,9 @@
+# binaries
+/opendiscord
+/bin/
+*.exe
+
+# local state
+.env
+*.log
+.DS_Store
