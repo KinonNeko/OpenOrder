@@ -1,0 +1,100 @@
+# Build, vet and test on every push and pull request.
+#
+# The store and voice suites skip themselves unless pointed at a real
+# PostgreSQL and a real LiveKit, so CI provides both -- otherwise the
+# interesting half of the suite would silently no-op here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: opendiscord
+          POSTGRES_PASSWORD: opendiscord
+          POSTGRES_DB: opendiscord
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U opendiscord"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # LiveKit runs as a plain background process rather than a service
+      # container: the tests need `--dev` (which mints the devkey/secret pair)
+      # and GitHub's service blocks cannot override an image's command.
+      - name: Start LiveKit
+        run: |
+          set -euo pipefail
+          curl -fsSL -o livekit.tar.gz \
+            https://github.com/livekit/livekit/releases/download/v1.13.5/livekit_1.13.5_linux_amd64.tar.gz
+          tar xzf livekit.tar.gz
+          ./livekit-server --dev --bind 127.0.0.1 &
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:7880/ >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "livekit-server did not become ready" >&2
+          exit 1
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      # -race is the point of this job: the gateway is concurrent and its
+      # regression tests are only meaningful with the detector on.
+      - name: go test -race
+        env:
+          OD_TEST_POSTGRES_DSN: postgres://opendiscord:opendiscord@127.0.0.1:5432/opendiscord?sslmode=disable
+          OD_TEST_LIVEKIT_URL: http://127.0.0.1:7880
+          OD_TEST_LIVEKIT_KEY: devkey
+          OD_TEST_LIVEKIT_SECRET: secret
+        run: go test -race -count=1 ./...
+
+      # A skipped test that was meant to run is a silent hole in coverage, so
+      # fail if the externally-backed suites did not actually execute.
+      - name: Assert external suites actually ran
+        env:
+          OD_TEST_POSTGRES_DSN: postgres://opendiscord:opendiscord@127.0.0.1:5432/opendiscord?sslmode=disable
+          OD_TEST_LIVEKIT_URL: http://127.0.0.1:7880
+          OD_TEST_LIVEKIT_KEY: devkey
+          OD_TEST_LIVEKIT_SECRET: secret
+        run: |
+          set -euo pipefail
+          out=$(go test -count=1 -v -run 'TestPgstoreConformance|TestLiveKitAcceptsOurToken|TestClientJoinsRoom' \
+                  ./internal/store/pgstore ./internal/voice)
+          echo "$out"
+          if echo "$out" | grep -q -- '--- SKIP'; then
+            echo "A suite that CI provides a backend for was skipped." >&2
+            exit 1
+          fi

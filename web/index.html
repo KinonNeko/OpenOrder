@@ -267,6 +267,18 @@ function appendMessage(m) {
   box.scrollTop = box.scrollHeight;
 }
 
+// Enter sends. A browser's implicit form submission is supposed to cover this,
+// but relying on it left the composer dead to the keyboard under automation --
+// and Enter is the single most-used action in a chat client, so it is worth
+// being explicit rather than subtle. preventDefault keeps implicit submission
+// from firing a second time where it does work.
+$("composeInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    $("composer").requestSubmit();
+  }
+});
+
 $("composer").addEventListener("submit", async (e) => {
   e.preventDefault();
   const content = $("composeInput").value.trim();

@@ -1,0 +1,406 @@
+#!/usr/bin/env bash
+#
+# dev -- one entry point for building, running and testing OpenDiscord.
+#
+# Exists because this project's dev loop has sharp edges that are easy to hit
+# and annoying to remember: Go is often not on PATH, there is no Docker here,
+# and the PostgreSQL and LiveKit suites silently skip themselves when their
+# backends are missing. Every command below either works or says exactly why
+# it cannot.
+#
+#   ./dev              start the app with demo accounts and open a browser
+#   ./dev run          start the app (in-memory store, nothing to install)
+#   ./dev run --pg     start the app on a local PostgreSQL
+#   ./dev check        gofmt + vet + build + test -race   (what CI runs)
+#   ./dev test         check, plus the suites that need PostgreSQL and LiveKit
+#   ./dev livekit      build livekit-server from source (needed by ./dev test)
+#   ./dev doctor       report what is and is not available on this machine
+#   ./dev clean        remove local dev state (.dev/)
+
+set -euo pipefail
+
+readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly DEV_DIR="$ROOT/.dev"
+readonly PG_PORT=55432
+readonly PG_DSN="postgres://postgres@127.0.0.1:${PG_PORT}/postgres?sslmode=disable"
+readonly APP_PORT="${OD_PORT:-8080}"
+readonly LK_PORT=7880
+
+# ---------------------------------------------------------------- output ----
+
+if [ -t 1 ]; then
+  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+  C_BLUE=$'\033[34m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'; C_OFF=$'\033[0m'
+else
+  C_RED=; C_GREEN=; C_YELLOW=; C_BLUE=; C_DIM=; C_BOLD=; C_OFF=
+fi
+
+step() { printf '%s==>%s %s%s%s\n' "$C_BLUE" "$C_OFF" "$C_BOLD" "$*" "$C_OFF"; }
+ok()   { printf '  %sok%s   %s\n'   "$C_GREEN"  "$C_OFF" "$*"; }
+warn() { printf '  %swarn%s %s\n'   "$C_YELLOW" "$C_OFF" "$*"; }
+bad()  { printf '  %sfail%s %s\n'   "$C_RED"    "$C_OFF" "$*"; }
+note() { printf '%s%s%s\n' "$C_DIM" "$*" "$C_OFF"; }
+die()  { printf '%serror:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
+
+# ------------------------------------------------------------ discovery ----
+
+# find_go locates a Go toolchain. On this project's dev machine Go lives in
+# ~/.local/go and is deliberately not on PATH, so looking there is not a guess.
+find_go() {
+  if command -v go >/dev/null 2>&1; then command -v go; return 0; fi
+  for candidate in "$HOME/.local/go/bin/go" /usr/local/go/bin/go /opt/homebrew/bin/go; do
+    [ -x "$candidate" ] && { echo "$candidate"; return 0; }
+  done
+  return 1
+}
+
+# find_pg locates a PostgreSQL install. There is no Docker and no Homebrew on
+# the dev machine, so a standalone binary set is the supported route; the
+# search order lets OD_PG_BIN override everything.
+find_pg() {
+  for candidate in \
+      "${OD_PG_BIN:-}" \
+      "$HOME/.local/share/opendiscord/pg/bin" \
+      "$(command -v pg_ctl >/dev/null 2>&1 && dirname "$(command -v pg_ctl)" || true)"; do
+    [ -n "$candidate" ] && [ -x "$candidate/pg_ctl" ] && { echo "$candidate"; return 0; }
+  done
+  return 1
+}
+
+find_livekit() {
+  for candidate in \
+      "${OD_LIVEKIT_BIN:-}" \
+      "$(command -v livekit-server 2>/dev/null || true)" \
+      "$HOME/.local/bin/livekit-server"; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] && { echo "$candidate"; return 0; }
+  done
+  return 1
+}
+
+GO=""
+require_go() {
+  GO="$(find_go)" || die "no Go toolchain found. Install Go, or set it up at ~/.local/go"
+  export PATH="$(dirname "$GO"):$PATH"
+}
+
+port_busy() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
+
+wait_for_http() { # url, seconds
+  local url="$1" limit="${2:-30}" waited=0
+  while ! curl -sf --max-time 1 "$url" >/dev/null 2>&1; do
+    waited=$((waited + 1))
+    [ "$waited" -ge "$((limit * 2))" ] && return 1
+    sleep 0.5
+  done
+  return 0
+}
+
+# ------------------------------------------------------------- postgres ----
+
+PG_BIN=""
+PG_DATA="$DEV_DIR/pgdata"
+PG_STARTED_BY_US=0
+
+pg_start() {
+  PG_BIN="$(find_pg)" || die "no PostgreSQL found.
+  Set OD_PG_BIN to a directory containing pg_ctl/initdb/postgres,
+  or run './dev run' without --pg to use the in-memory store."
+
+  if port_busy "$PG_PORT"; then
+    ok "PostgreSQL already listening on $PG_PORT"
+    return 0
+  fi
+
+  mkdir -p "$DEV_DIR"
+  if [ ! -f "$PG_DATA/PG_VERSION" ]; then
+    step "Initialising PostgreSQL in $PG_DATA"
+    rm -rf "$PG_DATA"
+    "$PG_BIN/initdb" -D "$PG_DATA" -U postgres -A trust -E UTF8 >/dev/null
+  fi
+
+  step "Starting PostgreSQL on port $PG_PORT"
+  # Unix sockets are disabled on purpose: the socket path can exceed the
+  # 100-odd character limit under deep temp directories, and TCP always works.
+  "$PG_BIN/pg_ctl" -D "$PG_DATA" -l "$DEV_DIR/pg.log" \
+    -o "-p $PG_PORT -c unix_socket_directories='' -c listen_addresses=127.0.0.1" \
+    -w start >/dev/null
+  PG_STARTED_BY_US=1
+  ok "PostgreSQL up ($PG_DSN)"
+}
+
+pg_stop() {
+  [ "$PG_STARTED_BY_US" -eq 1 ] || return 0
+  "$PG_BIN/pg_ctl" -D "$PG_DATA" -w stop >/dev/null 2>&1 || true
+  PG_STARTED_BY_US=0
+  return 0
+}
+
+# pg_stop_any stops a database left behind by an earlier run, which pg_stop
+# deliberately will not touch (it only undoes what this process started).
+pg_stop_any() {
+  local bin
+  bin="$(find_pg 2>/dev/null)" || return 0
+  [ -f "$PG_DATA/postmaster.pid" ] || return 0
+  "$bin/pg_ctl" -D "$PG_DATA" -w stop >/dev/null 2>&1 || true
+  return 0
+}
+
+# -------------------------------------------------------------- livekit ----
+
+LK_PID=""
+
+livekit_start() {
+  local bin
+  if ! bin="$(find_livekit)"; then return 1; fi
+  if port_busy "$LK_PORT"; then
+    ok "LiveKit already listening on $LK_PORT"
+    return 0
+  fi
+  step "Starting LiveKit on port $LK_PORT"
+  mkdir -p "$DEV_DIR"
+  "$bin" --dev --bind 127.0.0.1 >"$DEV_DIR/livekit.log" 2>&1 &
+  LK_PID=$!
+  if ! wait_for_http "http://127.0.0.1:$LK_PORT/" 20; then
+    bad "LiveKit did not come up; see $DEV_DIR/livekit.log"
+    return 1
+  fi
+  ok "LiveKit up (devkey/secret)"
+}
+
+livekit_stop() {
+  [ -n "$LK_PID" ] && kill "$LK_PID" 2>/dev/null || true
+  LK_PID=""
+}
+
+# ------------------------------------------------------------- commands ----
+
+cmd_doctor() {
+  step "Environment"
+  local go_bin pg_bin lk_bin
+  if go_bin="$(find_go)"; then
+    ok "Go        $("$go_bin" version | awk '{print $3}')  ($go_bin)"
+  else
+    bad "Go        not found -- nothing will build"
+  fi
+  if pg_bin="$(find_pg)"; then
+    ok "PostgreSQL $("$pg_bin/postgres" --version | awk '{print $3}')  ($pg_bin)"
+  else
+    warn "PostgreSQL not found -- './dev run --pg' and the pgstore suite are unavailable"
+    note "         set OD_PG_BIN=/path/to/pg/bin if you have one elsewhere"
+  fi
+  if lk_bin="$(find_livekit)"; then
+    ok "LiveKit   $("$lk_bin" --version 2>/dev/null | awk '{print $NF}')  ($lk_bin)"
+  else
+    warn "LiveKit   not found -- the voice suite will skip. Run './dev livekit'"
+  fi
+  command -v docker >/dev/null 2>&1 \
+    && ok "Docker    present" \
+    || note "  Docker    absent (expected on this machine; nothing here needs it)"
+
+  step "Ports"
+  for p in "$APP_PORT:app" "$PG_PORT:postgres" "$LK_PORT:livekit"; do
+    local port="${p%%:*}" name="${p##*:}"
+    if port_busy "$port"; then warn "$port ($name) already in use"; else ok "$port ($name) free"; fi
+  done
+}
+
+cmd_check() {
+  require_go
+  cd "$ROOT"
+  step "gofmt"
+  local unformatted
+  unformatted="$(gofmt -l .)"
+  if [ -n "$unformatted" ]; then
+    bad "needs formatting:"; echo "$unformatted"
+    die "run: gofmt -w ."
+  fi
+  ok "clean"
+
+  step "go vet"; "$GO" vet ./... && ok "clean"
+  step "go build"; "$GO" build ./... && ok "clean"
+  step "go test -race"; "$GO" test -race -count=1 ./...
+}
+
+cmd_test() {
+  require_go
+  cd "$ROOT"
+  trap cleanup EXIT INT TERM
+
+  local pg_ok=0 lk_ok=0
+  if find_pg >/dev/null 2>&1; then pg_start && pg_ok=1; else
+    warn "PostgreSQL unavailable -- the pgstore suite will skip"
+  fi
+  if livekit_start; then lk_ok=1; else
+    warn "LiveKit unavailable -- the voice suite will skip (run './dev livekit')"
+  fi
+
+  step "go test -race ./... (with every backend this machine can offer)"
+  local env_args=()
+  [ "$pg_ok" -eq 1 ] && env_args+=("OD_TEST_POSTGRES_DSN=$PG_DSN")
+  if [ "$lk_ok" -eq 1 ]; then
+    env_args+=("OD_TEST_LIVEKIT_URL=http://127.0.0.1:$LK_PORT"
+               "OD_TEST_LIVEKIT_KEY=devkey" "OD_TEST_LIVEKIT_SECRET=secret")
+  fi
+  env "${env_args[@]}" "$GO" test -race -count=1 ./...
+
+  echo
+  [ "$pg_ok" -eq 1 ] && ok "pgstore suite ran against a real PostgreSQL" \
+                     || warn "pgstore suite skipped"
+  [ "$lk_ok" -eq 1 ] && ok "voice suite ran against a real LiveKit" \
+                     || warn "voice suite skipped"
+}
+
+cmd_livekit() {
+  require_go
+  local bin
+  if bin="$(find_livekit)"; then
+    ok "already installed: $bin ($("$bin" --version | awk '{print $NF}'))"
+    return 0
+  fi
+  step "Building livekit-server v1.13.5 from source"
+  note "LiveKit publishes no darwin binary, so this builds it via the Go module"
+  note "proxy. It is pure Go and takes well under a minute."
+  mkdir -p "$HOME/.local/bin"
+  # The main package sits in cmd/server; the module root holds only a magefile,
+  # so installing the bare module path fails with "build constraints exclude
+  # all Go files".
+  GOBIN="$HOME/.local/bin" "$GO" install github.com/livekit/livekit-server/cmd/server@v1.13.5
+  mv "$HOME/.local/bin/server" "$HOME/.local/bin/livekit-server"
+  ok "installed $HOME/.local/bin/livekit-server"
+}
+
+APP_PID=""
+
+# cleanup must never abort part-way: under `set -e` a failing command inside a
+# trap stops the rest of it, and killing an already-exited process returns
+# non-zero. That is how a stray PostgreSQL used to survive Ctrl-C.
+cleanup() {
+  set +e
+  [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null
+  livekit_stop
+  pg_stop
+  return 0
+}
+
+app_start() { # store mode: "memory" | "postgres"
+  local mode="$1"
+  if port_busy "$APP_PORT"; then
+    die "port $APP_PORT is already in use. Stop it, or set OD_PORT=<other>."
+  fi
+  mkdir -p "$DEV_DIR"
+
+  # Build and exec the binary rather than `go run`: go run spawns the server as
+  # a grandchild and does not reliably pass signals down to it, so Ctrl-C left
+  # a server holding the port. Running it directly also makes restarts instant.
+  step "Building"
+  "$GO" build -o "$DEV_DIR/opendiscord" ./cmd/opendiscord
+
+  step "Starting OpenDiscord on :$APP_PORT (store: $mode)"
+  if [ "$mode" = postgres ]; then
+    OD_ADDR=":$APP_PORT" OD_STORE=postgres OD_POSTGRES_DSN="$PG_DSN" \
+      "$DEV_DIR/opendiscord" &
+  else
+    OD_ADDR=":$APP_PORT" "$DEV_DIR/opendiscord" &
+  fi
+  APP_PID=$!
+  if ! wait_for_http "http://127.0.0.1:$APP_PORT/api/v0/gateway" 60; then
+    die "server did not come up"
+  fi
+  ok "listening on http://localhost:$APP_PORT"
+}
+
+app_wait() {
+  cat <<EOF
+
+  ${C_BOLD}http://localhost:$APP_PORT${C_OFF}
+
+  ${C_DIM}Press Ctrl-C to stop.${C_OFF}
+EOF
+  wait "$APP_PID"
+}
+
+# seed creates two accounts so the two-browser chat loop can be tested without
+# filling in the registration form twice.
+seed() {
+  local created=()
+  for name in alice bob; do
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+      "http://127.0.0.1:$APP_PORT/api/v0/auth/register" \
+      -H 'Content-Type: application/json' \
+      -d "{\"username\":\"$name\",\"password\":\"password123\"}")"
+    case "$code" in
+      201) created+=("$name") ;;
+      409) created+=("$name (already existed)") ;;
+      *)   warn "could not create $name (HTTP $code)" ;;
+    esac
+  done
+  [ "${#created[@]}" -gt 0 ] && ok "demo accounts: ${created[*]}"
+}
+
+cmd_run() {
+  require_go
+  cd "$ROOT"
+  local mode=memory
+  [ "${1:-}" = "--pg" ] && mode=postgres
+  trap cleanup EXIT INT TERM
+  [ "$mode" = postgres ] && pg_start
+  app_start "$mode"
+  app_wait
+}
+
+cmd_demo() {
+  require_go
+  cd "$ROOT"
+  trap cleanup EXIT INT TERM
+  app_start memory
+  seed
+  cat <<EOF
+
+  ${C_BOLD}OpenDiscord is running: http://localhost:$APP_PORT${C_OFF}
+
+  To see the realtime loop, open it in ${C_BOLD}two${C_OFF} windows -- one normal, one
+  private/incognito, so they hold separate sessions -- and sign in as:
+
+      alice / password123
+      bob   / password123
+
+  Type in one window; it appears in the other without a refresh. Creating a
+  channel in one shows up in both. Data is in memory and disappears on exit;
+  use ${C_BOLD}./dev run --pg${C_OFF} if you want it to survive a restart.
+
+  ${C_DIM}Press Ctrl-C to stop.${C_OFF}
+EOF
+  command -v open >/dev/null 2>&1 && open "http://localhost:$APP_PORT" || true
+  wait "$APP_PID"
+}
+
+cmd_clean() {
+  # Stop a database left running by an earlier invocation before deleting the
+  # files out from under it.
+  pg_stop_any
+  if [ -d "$DEV_DIR" ]; then
+    rm -rf "$DEV_DIR"
+    ok "removed $DEV_DIR"
+  else
+    ok "nothing to clean"
+  fi
+}
+
+# usage reprints this file's header comment, so the help text and the
+# documentation cannot drift apart.
+usage() {
+  awk 'NR>2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+}
+
+case "${1:-demo}" in
+  demo)     cmd_demo ;;
+  run)      shift; cmd_run "$@" ;;
+  check)    cmd_check ;;
+  test)     cmd_test ;;
+  livekit)  cmd_livekit ;;
+  doctor)   cmd_doctor ;;
+  clean)    cmd_clean ;;
+  -h|--help|help) usage ;;
+  *) die "unknown command '${1}'. Run './dev help'." ;;
+esac

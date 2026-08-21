@@ -1,7 +1,7 @@
 # 交接文档(→ 下一个会话)
 
 > 目的:让一个全新会话(无本会话上下文)无缝接管 OpenDiscord 开发。
-> 最后更新:2026-08-21,LiveKit 集成验证 + 六项协议/实现不一致修复完成时。
+> 最后更新:2026-08-21,LiveKit 验证 + 六项不一致修复 + CI 与 `./dev` 入口完成时。
 
 ## 一、项目是什么
 
@@ -22,6 +22,13 @@
 - **pgstore 已用真实 PostgreSQL 18 冒烟验证**:schema 自动建表、注册、发消息、建频道、重启后数据与 Token 持久
 - docker-compose.yml + Dockerfile 已写好,但**因开发机无 Docker 未整体验证**
 
+### 工程化(2026-08-21)
+
+- **CI 已建**(见 §四),**但工作流本身未在本地验证过**
+- **`./dev` 开发入口**(见 §三):一条命令起服 + 演示账号;`./dev test` 会自动
+  拉起 PostgreSQL 与 LiveKit 跑全量测试
+- HANDOFF 旧版「待决策」的六项不一致**已全部修复**,决策理由见 §七
+
 ### LiveKit 集成验证已完成(M2 前置探针)
 
 架构决策 C(PLANNING §3.1)的地基假设 **已实测成立**:
@@ -41,7 +48,43 @@
 尚未接线:REST 端点(`/channels/{id}/voice/join`)、Webhook 入口、`VOICE_STATE_UPDATE`
 事件、`type: 2` 语音频道的建立 —— 这些是 M2 的工作,§5 已把形状定下来。
 
-## 三、开发机环境(重要,都是坑)
+## 三、开发入口:`./dev`
+
+**先看这个,再看下面的环境坑** —— 下面那些坑,`./dev` 大部分已经替你处理了。
+
+```sh
+./dev            # 起服 + 建 alice/bob 演示账号 + 开浏览器,零依赖
+./dev check      # gofmt + vet + build + test -race(与 CI 完全一致)
+./dev test       # check 之上自动拉起 PostgreSQL 与 LiveKit,跑全量,跑完收拾干净
+./dev doctor     # 本机有什么、缺什么、端口占没占
+./dev livekit    # 从源码装 livekit-server
+./dev clean      # 清掉 .dev/
+```
+
+脚本自己找 Go(含 `~/.local/go`)、找 PostgreSQL(`~/.local/share/opendiscord/pg`,
+可用 `OD_PG_BIN` 覆盖)、找 livekit-server。端口冲突用 `OD_PORT=` 换。
+本地状态都在 `.dev/`(已 gitignore)。
+
+写脚本时踩到并已修的两个坑,改它时别踩回去:
+
+- **`set -e` 下 trap 会中途夭折** —— `kill` 一个已经死掉的 pid 返回非零,
+  trap 就此中断,后面的 `pg_stop` 永远不执行,PostgreSQL 被遗留。
+  所以 `cleanup()` 里第一行是 `set +e`。
+- **`go run` 不可靠地转发信号** —— 它把服务器起成孙子进程,Ctrl-C 只杀掉
+  `go run` 本身,真正占着端口的二进制活得好好的。现在改为先 `go build` 到
+  `.dev/opendiscord` 再直接执行,信号链才是通的(顺带让重启变快)。
+
+## 四、CI
+
+`.github/workflows/ci.yml`:gofmt / vet / build / `go test -race ./...`,
+并起真实 PostgreSQL(service container)与 LiveKit(下载 linux 二进制后台跑),
+让 pgstore 与 voice 套件**真正执行**;最后一步专门断言这两个套件没有被 skip ——
+「全绿」不等于「全跑了」,静默 skip 是最容易骗过自己的覆盖率空洞。
+
+> **未在本地验证过**:这台机器没有 Docker,也没有 act,工作流 YAML 本身跑不起来。
+> 里面每条命令我都在本地单独跑通了,但**工作流首次推送后必须去看一眼 Actions 结果**。
+
+## 五、开发机环境(重要,都是坑)
 
 - macOS arm64,**无 Homebrew、无 Docker、无 Node**;Go 1.27.0 装在 `~/.local/go`,
   不在 PATH —— 每次构建先 `export PATH=$HOME/.local/go/bin:$PATH`
@@ -75,7 +118,7 @@
 - git 已配置(user: KinonNeko / kinonneko@gmail.com),GitHub SSH 认证可用;
   机器上没有 gh CLI,也没有 HTTPS 凭证 —— **能推送已存在的仓库,不能创建仓库**
 
-## 四、本地跑起来
+## 六、本地跑起来
 
 ```sh
 export PATH=$HOME/.local/go/bin:$PATH
@@ -85,9 +128,9 @@ go run ./cmd/opendiscord        # 内存存储,:8080,开两个浏览器注册两
 PG 模式:`OD_STORE=postgres OD_POSTGRES_DSN='postgres://…' go run ./cmd/opendiscord`。
 环境变量表在 README.md。
 
-## 五、已定的协议决策(2026-08-21,六项一次性补齐)
+## 七、已定的协议决策(2026-08-21,六项一次性补齐)
 
-上一版本 HANDOFF 在此列了六项「文档与实现不一致」待决策。**已全部修复并验证**,
+上一版本 HANDOFF 的「待决策」一节列了六项「文档与实现不一致」待决策。**已全部修复并验证**,
 决策与理由记录如下 —— 它们都写进了 PROTOCOL.md,这里只解释「为什么这样选」。
 
 1. **gateway send-on-closed-channel 竞态(会 panic 整个进程)** —— 已修。
@@ -136,19 +179,28 @@ PG 模式:`OD_STORE=postgres OD_POSTGRES_DSN='postgres://…' go run ./cmd/opend
 本次已用真实 PostgreSQL 跑通 store 一致性测试,并用一个端到端程序驱动真实服务器
 验证了全部六项(含回填:删空 `guild_members` → 重启 → 成员关系恢复)。
 
-## 六、下一步(按优先级)
+## 八、下一步(按优先级)
 
-1. **CI**:build / vet / `go test -race ./...`。现在有真测试了,没有 CI 是最大的欠账
+1. **确认 CI 首次运行结果**(见 §四 的未验证声明),绿了再往下走
 2. **M1 开工**(PLANNING §3.3):权限/角色(allow/deny 位掩码,先进协议)、线程、
    Reaction、未读同步、`MESSAGE_UPDATE/DELETE`、`TYPING_START`、`PRESENCE_UPDATE`。
-   §五 第 2、3 条已为它铺好路(序号语义、成员关系),可直接开工
+   §七 第 2、3 条已为它铺好路(序号语义、成员关系),可直接开工
 3. **`RESUME`**(PROTOCOL §4.3 已承诺 M1 加入):每连接重放缓冲 + HEARTBEAT `d`
    作为重放起点。序号语义已定,剩下的是缓冲区大小与失效策略
 4. 装 Docker 后跑一次 `docker compose up --build` 验证整体;compose 里加 livekit 服务
 5. M2 语音接线:按 PROTOCOL §5 实现 REST/Webhook/`VOICE_STATE_UPDATE`,
    先答 §5.6 的三个待定问题
 
-## 七、约定(接手后请遵守)
+### 参考客户端的已知毛刺(不挡路,但会绊到测试的人)
+
+- 频道尚未选中时(READY 到达前的一瞬)按回车发消息,会被**静默丢弃**:
+  `composer` 的 submit 处理器里 `if (!content || !state.current) return;`
+  既不发送也不提示,输入框里的字还在。窗口极短,但表现是「打了字按回车没反应」。
+  修法:选中频道前禁用输入框,或给出可见反馈。
+- 回车发送此前依赖浏览器的隐式表单提交,在自动化环境下完全不触发。现已改为
+  显式 `keydown` 处理器(带 `isComposing` 判断,否则中文输入法组词途中按回车会误发)。
+
+## 九、约定(接手后请遵守)
 
 - 协议先行:改 API/事件 → 先改 PROTOCOL.md,再改代码,参考客户端同步更新
 - 范围纪律:PLANNING §2.3「明确不做」清单未经讨论不推翻;新想法先记进 PLANNING 再排期
