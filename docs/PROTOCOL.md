@@ -227,7 +227,128 @@ M1 起按频道权限过滤(权限系统进入规范时同步定义可见性规�
 
 ---
 
-## 5. 与实现的对应关系
+## 5. 语音(草案 · M2)
+
+> 状态:**Draft,未实现**。本章先于实现落笔(见文首变更策略)。
+> 其中的**集成假设已实测验证**:2026-08-21,以 livekit-server v1.13.5
+> (darwin/arm64,源码构建)验证「后端签发令牌 → 客户端入房 → SFU 侧确认参与者在位」,
+> 见 `internal/voice` 的一致性测试。接口形状仍可变。
+
+语音基于自托管 LiveKit(PLANNING §3.1 决策 C)。本章定义主系统与 LiveKit 的
+职责边界,以及客户端看到的那一面。
+
+### 5.1 模型:房间是频道的投影
+
+语音频道即 `type: 2` 的 Channel,在 LiveKit 中对应一个 Room,命名 `ch_<channel_id>`。
+
+该映射是**全函数、无状态**的:房间名由频道 ID 直接算得,反之亦然。服务端
+**不存储**「频道 ↔ 房间」对照表 —— 没有对照表,就没有对不上的可能。房间由
+LiveKit 在首个参与者加入时惰性创建;频道删除时服务端显式销毁房间。
+
+### 5.2 授权边界(本章最重要的约束)
+
+**LiveKit 不做任何授权判断。** 权限一律由主系统裁决,裁决结果编码进一枚短时效
+签名令牌,LiveKit 只执行我们已经做出的决定。
+
+由此推出三条硬性规则:
+
+- 客户端**不得**直接向 LiveKit 申请令牌,任何时候都拿不到 API Secret
+- 令牌 TTL 以分钟计(默认 5 分钟)。它是一次「入房许可」,不是会话凭证 ——
+  握手完成后会话由 LiveKit 维持,令牌过期**不影响**已在房内的参与者
+- 参与者 identity 恒为**用户 Snowflake**,不是 username(username 可变,identity 必须稳定)。
+  副作用恰是我们想要的:LiveKit 对同一 identity 在同一房间只允许一个参与者,
+  于是「同一账号不能重复占用同一语音频道」无需额外实现
+
+### 5.3 REST
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/channels/{channel_id}/voice/join` | 申请入房凭证 |
+| DELETE | `/channels/{channel_id}/voice/join` | 主动离开语音(幂等) |
+
+POST 响应:
+
+```json
+{
+  "url": "wss://livekit.example.org",
+  "token": "<JWT>",
+  "room": "ch_48291057123330",
+  "expires_at": "2026-08-21T07:17:03.451Z",
+  "grants": { "publish": true, "subscribe": true, "publish_data": true }
+}
+```
+
+`grants` 是服务端裁决结果的**回显**,仅供客户端渲染 UI(如 `publish: false` 时
+禁用麦克风按钮)。它**不具备安全意义** —— 真正的强制写在令牌里,客户端篡改
+回显不会让 LiveKit 多放行任何东西。
+
+错误码:
+
+| 错误码 | HTTP | 触发 |
+|---|---|---|
+| `voice_disabled` | 503 | 本实例未配置 LiveKit |
+| `not_a_voice_channel` | 400 | 频道 `type` ≠ 2 |
+| `voice_forbidden` | 403 | 无该频道的连接权限(M1 权限系统裁决) |
+| `voice_channel_full` | 409 | 达到 `user_limit` |
+
+Channel 对象在本章实现时新增(仅 `type: 2` 有意义):`user_limit`(整数,`null` = 不限)。
+预留:`bitrate`。
+
+### 5.4 语音状态与 Gateway 事件
+
+谁在哪个语音频道里,**以 LiveKit 为准**,服务端只做镜像。理由是掉线、超时、
+网络切换只有 SFU 看得见 —— 服务端自行记账必然与实际漂移。
+
+LiveKit 经 Webhook 通知服务端参与者进出,服务端转译为 Gateway 事件广播:
+
+| 事件 | 载荷 | 触发 |
+|---|---|---|
+| `VOICE_STATE_UPDATE` | VoiceState 对象 | 加入 / 离开 / 静音状态变化 |
+
+```json
+{
+  "user_id": "48291057123328",
+  "channel_id": "48291057123330",
+  "self_mute": false,
+  "self_deaf": false,
+  "server_mute": false
+}
+```
+
+`channel_id` 为 `null` 表示该用户已离开语音。
+
+Webhook 入口:`POST /api/v0/livekit/webhook`,以 LiveKit 的 `Authorization` 头
+(同一 API Key/Secret 签名)校验;**该端点不接受用户 Token**,也不在 `/auth` 保护范围内。
+
+READY 载荷在本章实现时追加 `voice_states` 字段(当前 Guild 内全部语音状态),
+使客户端一上线即可渲染语音频道内的人。
+
+### 5.5 审核动作
+
+服务器静音、踢出语音、移动成员(PLANNING §2.1)由客户端走 REST 发起,服务端
+用一枚**管理令牌**调用 LiveKit 的 RoomService 执行。管理令牌永不下发客户端,
+单次调用现签、有效期数十秒。
+
+| 动作 | LiveKit 调用 |
+|---|---|
+| 服务器静音 | `MutePublishedTrack` |
+| 踢出语音 | `RemoveParticipant` |
+| 移动成员 | 目标房间重新签发令牌 + 源房间 `RemoveParticipant`(LiveKit 无原生移动语义,由服务端组合) |
+
+### 5.6 待定(实现前需拍板)
+
+1. **`user_limit` 的强制点**:服务端签发前检查(存在 TOCTOU 窗口),还是依赖
+   LiveKit Room 的 `max_participants`(需在房间创建时设定,而房间是惰性创建的)?
+   倾向后者 —— 由服务端显式创建房间并带上上限,放弃惰性创建。
+2. **多节点部署下的 Webhook 路由**:Webhook 落到哪个实例不确定,而 Gateway 连接
+   分散在各实例,需要 Redis 扇出(Redis 已是 PLANNING §3.2 的既定依赖)。
+3. **视频 / 屏幕共享的 grant 粒度**:当前 `publish` 是麦克风、摄像头、屏幕共享的
+   合一开关。Discord 将「视频」与「直播/屏幕共享」拆为独立权限位;是否跟进,
+   须在 M1 权限位掩码定型时一并决定 —— 位掩码一旦发布就难改。
+
+---
+
+## 6. 与实现的对应关系
 
 | 规范章节 | 实现位置 |
 |---|---|
@@ -235,4 +356,5 @@ M1 起按频道权限过滤(权限系统进入规范时同步定义可见性规�
 | Gateway | `internal/gateway` |
 | 对象与存储 | `internal/store`(接口)、`memstore` / `pgstore`(实现) |
 | Snowflake | `internal/ids` |
+| 语音(§5) | `internal/voice`(令牌签发与房间映射;REST/Webhook 尚未接线) |
 | 参考客户端 | `web/index.html` |
