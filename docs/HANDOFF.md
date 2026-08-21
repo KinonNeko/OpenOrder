@@ -54,10 +54,12 @@
 
 ```sh
 ./dev            # 起服 + 建 alice/bob 演示账号 + 开浏览器,零依赖
-./dev check      # gofmt + vet + build + test -race(与 CI 完全一致)
-./dev test       # check 之上自动拉起 PostgreSQL 与 LiveKit,跑全量,跑完收拾干净
+./dev check      # actionlint + gofmt + vet + build + test -race(不碰外部服务)
+./dev ci         # CI 跑的就是这条:check + 自动拉起 PG/LiveKit + 断言没被 skip
+./dev test       # ci 的别名
 ./dev doctor     # 本机有什么、缺什么、端口占没占
 ./dev livekit    # 从源码装 livekit-server
+./dev actionlint # 装 GitHub Actions 静态检查器
 ./dev clean      # 清掉 .dev/
 ```
 
@@ -76,13 +78,38 @@
 
 ## 四、CI
 
-`.github/workflows/ci.yml`:gofmt / vet / build / `go test -race ./...`,
-并起真实 PostgreSQL(service container)与 LiveKit(下载 linux 二进制后台跑),
-让 pgstore 与 voice 套件**真正执行**;最后一步专门断言这两个套件没有被 skip ——
-「全绿」不等于「全跑了」,静默 skip 是最容易骗过自己的覆盖率空洞。
+**结构:逻辑在 `./dev`,YAML 只剩样板。** 工作流做三件事 —— checkout、装 Go、
+挂一个 PostgreSQL service container —— 然后跑一行 `./dev ci`。
 
-> **未在本地验证过**:这台机器没有 Docker,也没有 act,工作流 YAML 本身跑不起来。
-> 里面每条命令我都在本地单独跑通了,但**工作流首次推送后必须去看一眼 Actions 结果**。
+这个拆分是针对「本机没 Docker、没 act,工作流验证不了」这个问题的正面解法:
+逻辑留在 YAML 里,推上去之前就是零验证;搬进 shell 脚本,它就能在笔记本上逐条跑,
+而剩下的样板交给 `actionlint` 静态校验(已并入 `./dev check`,
+`./dev actionlint` 可安装它 —— 纯 Go,不需要 Docker)。
+
+`./dev ci` 优先使用环境里已有的后端(`OD_TEST_POSTGRES_DSN` / `OD_TEST_LIVEKIT_URL`),
+缺的自己起。结尾 `assert_suites_ran` 断言 pgstore 与 voice **确实跑了**:
+它们缺后端时自动 skip,不断言的话绿灯可能只是覆盖率空了一块。
+
+### 验证到什么程度(重要,别高估也别低估)
+
+**已在本地实测:**
+
+- `actionlint` 对本工作流干净;并且**反向验证过它不是摆设** —— 故意写错 runner 标签、
+  塞不存在的 action 输入,它都能抓出来(它是拿真实 action 元数据校验的)
+- `./dev ci` 两条路径都跑通:自起后端,以及 `OD_TEST_POSTGRES_DSN` 由环境提供
+  (后者就是 GitHub service container 的形态)
+- 跳过断言真的会失败:强行让 pgstore 套件 skip,`./dev ci` 以**退出码 1** 退出
+- `dev` 在 git 里是 `100755`(CI 直接 `./dev ci`,少了执行位就跑不了)
+
+**仍未验证(只能靠真跑一次):** GitHub 自身的管道 —— `actions/checkout`、
+`actions/setup-go` 能否把 `go 1.27` 解析成实际版本、service container 的端口映射与
+健康检查、runner 上 `go install livekit-server` 是否顺利。
+
+> 没有 shellcheck(Haskell 二进制,本机装不了),所以 actionlint 不分析 `run:` 里的
+> shell —— 但重构之后 YAML 里只剩 `run: ./dev ci` 一行,这个缺口基本被消掉了。
+
+> **首次推送后必须去看一眼 Actions 结果。** 注意第一次很可能是红的,那是设计使然:
+> 任何一个后端没起来都会让套件 skip,进而被断言判失败,而不是悄悄绿灯。
 
 ## 五、开发机环境(重要,都是坑)
 

@@ -37,9 +37,10 @@ docker compose 因开发机无 Docker 尚未整体验证。
 | `./dev` | 起服 + 演示账号 + 开浏览器(等同 `./dev demo`) |
 | `./dev run` | 只起服,内存存储,零依赖 |
 | `./dev run --pg` | 起服 + 本地 PostgreSQL(数据可跨重启) |
-| `./dev check` | gofmt + vet + build + `test -race` —— **与 CI 完全一致** |
-| `./dev test` | 在 `check` 基础上自动拉起 PostgreSQL 与 LiveKit,跑全量测试 |
-| `./dev livekit` | 从源码构建 livekit-server(`./dev test` 需要) |
+| `./dev check` | actionlint + gofmt + vet + build + `test -race`(不碰外部服务) |
+| `./dev test` / `./dev ci` | `check` 之上自动拉起 PostgreSQL 与 LiveKit,**CI 跑的就是这条** |
+| `./dev livekit` | 从源码构建 livekit-server |
+| `./dev actionlint` | 装 GitHub Actions 静态检查器(`./dev check` 会用) |
 | `./dev doctor` | 报告本机有什么、缺什么、端口是否被占 |
 | `./dev clean` | 清掉本地开发状态(`.dev/`) |
 
@@ -82,9 +83,22 @@ OD_TEST_LIVEKIT_KEY=devkey OD_TEST_LIVEKIT_SECRET=secret go test ./internal/voic
 
 ## CI
 
-`.github/workflows/ci.yml`:gofmt / vet / build / `go test -race`,并起真实的
-PostgreSQL 与 LiveKit 让对应套件真正执行。**注意:本机没有 Docker,该工作流
-从未在本地验证过,首次推送后需要看一眼 Actions 结果。**
+`.github/workflows/ci.yml` 刻意写得很薄:**所有检查逻辑都在 `./dev` 里**,
+工作流本身只做 checkout、装 Go、挂一个 PostgreSQL service container,
+然后跑一行 `./dev ci`。
+
+这么拆是因为本机没有 Docker 也没有 act,工作流跑不起来 —— 逻辑留在 YAML 里
+就等于推上去之前谁也没验证过。搬进 shell 脚本后,那部分**可以在笔记本上逐条跑**,
+YAML 里只剩标准样板,而样板由 `actionlint` 静态校验(已并入 `./dev check`)。
+
+`./dev ci` 会用环境里给定的后端(GitHub 用 service container 提供 PostgreSQL),
+缺什么就自己起什么;末尾断言 pgstore 与 voice 套件**确实执行过** ——
+它们缺后端时会自动 skip,不断言的话「全绿」可能只是覆盖率空了一块。
+
+已在本地验证:`actionlint` 干净(且实测能抓出错误 runner 标签与不存在的 action 输入)、
+`./dev ci` 两条路径都跑通(自起后端 / 环境提供 PostgreSQL)、跳过断言在套件被 skip 时
+确实以退出码 1 失败。**尚未验证:GitHub 自身的管道**(checkout、setup-go 解析 `go 1.27`、
+service container 端口映射)—— 这只能靠真跑一次,首次推送后请看一眼 Actions。
 
 ## 配置
 

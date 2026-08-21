@@ -11,9 +11,11 @@
 #   ./dev              start the app with demo accounts and open a browser
 #   ./dev run          start the app (in-memory store, nothing to install)
 #   ./dev run --pg     start the app on a local PostgreSQL
-#   ./dev check        gofmt + vet + build + test -race   (what CI runs)
-#   ./dev test         check, plus the suites that need PostgreSQL and LiveKit
+#   ./dev check        lint + gofmt + vet + build + test -race
+#   ./dev test         check, plus the suites needing PostgreSQL and LiveKit
+#   ./dev ci           exactly what CI runs (alias of test; uses OD_TEST_* if set)
 #   ./dev livekit      build livekit-server from source (needed by ./dev test)
+#   ./dev actionlint   install the GitHub Actions linter used by ./dev check
 #   ./dev doctor       report what is and is not available on this machine
 #   ./dev clean        remove local dev state (.dev/)
 
@@ -48,8 +50,9 @@ die()  { printf '%serror:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 # ~/.local/go and is deliberately not on PATH, so looking there is not a guess.
 find_go() {
   if command -v go >/dev/null 2>&1; then command -v go; return 0; fi
+  local candidate
   for candidate in "$HOME/.local/go/bin/go" /usr/local/go/bin/go /opt/homebrew/bin/go; do
-    [ -x "$candidate" ] && { echo "$candidate"; return 0; }
+    if [ -x "$candidate" ]; then echo "$candidate"; return 0; fi
   done
   return 1
 }
@@ -58,21 +61,23 @@ find_go() {
 # the dev machine, so a standalone binary set is the supported route; the
 # search order lets OD_PG_BIN override everything.
 find_pg() {
+  local candidate
   for candidate in \
       "${OD_PG_BIN:-}" \
       "$HOME/.local/share/opendiscord/pg/bin" \
       "$(command -v pg_ctl >/dev/null 2>&1 && dirname "$(command -v pg_ctl)" || true)"; do
-    [ -n "$candidate" ] && [ -x "$candidate/pg_ctl" ] && { echo "$candidate"; return 0; }
+    if [ -n "$candidate" ] && [ -x "$candidate/pg_ctl" ]; then echo "$candidate"; return 0; fi
   done
   return 1
 }
 
 find_livekit() {
+  local candidate
   for candidate in \
       "${OD_LIVEKIT_BIN:-}" \
       "$(command -v livekit-server 2>/dev/null || true)" \
       "$HOME/.local/bin/livekit-server"; do
-    [ -n "$candidate" ] && [ -x "$candidate" ] && { echo "$candidate"; return 0; }
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then echo "$candidate"; return 0; fi
   done
   return 1
 }
@@ -204,9 +209,16 @@ cmd_doctor() {
   done
 }
 
-cmd_check() {
-  require_go
-  cd "$ROOT"
+# gate is the single definition of "is this code good". CI runs it through
+# './dev ci' rather than restating the steps in YAML, so the two cannot drift
+# and so the whole thing stays runnable on a laptop with no Docker.
+#
+# It honours OD_TEST_* from the environment: whatever backends are configured
+# get used, and anything absent makes its suite skip.
+gate() {
+  step "workflow lint"
+  lint_workflows
+
   step "gofmt"
   local unformatted
   unformatted="$(gofmt -l .)"
@@ -216,38 +228,115 @@ cmd_check() {
   fi
   ok "clean"
 
-  step "go vet"; "$GO" vet ./... && ok "clean"
+  step "go vet";   "$GO" vet ./...   && ok "clean"
   step "go build"; "$GO" build ./... && ok "clean"
-  step "go test -race"; "$GO" test -race -count=1 ./...
+
+  # -race is the point: the gateway is concurrent and its regression tests only
+  # mean anything with the detector on.
+  step "go test -race"
+  "$GO" test -race -count=1 ./...
+
+  assert_suites_ran
 }
 
-cmd_test() {
+# assert_suites_ran fails when a suite skipped even though its backend was
+# provided. Those suites skip themselves when unconfigured, so without this a
+# misconfigured DSN would show up as a green run rather than as lost coverage.
+assert_suites_ran() {
+  local targets=() names=()
+  if [ -n "${OD_TEST_POSTGRES_DSN:-}" ]; then
+    targets+=("./internal/store/pgstore"); names+=("pgstore")
+  fi
+  if [ -n "${OD_TEST_LIVEKIT_URL:-}" ]; then
+    targets+=("./internal/voice"); names+=("voice")
+  fi
+  if [ "${#targets[@]}" -eq 0 ]; then
+    note "  no external backends configured -- pgstore and voice suites skipped by design"
+    return 0
+  fi
+
+  step "confirming the external suites actually ran"
+  local out
+  if ! out="$("$GO" test -count=1 -v "${targets[@]}" 2>&1)"; then
+    echo "$out"; die "external suites failed"
+  fi
+  if grep -q -- '--- SKIP' <<<"$out"; then
+    grep -- '--- SKIP' <<<"$out"
+    die "a suite skipped despite its backend being configured"
+  fi
+  ok "${names[*]} ran against real backends (no skips)"
+}
+
+# lint_workflows checks the GitHub Actions YAML. actionlint validates it
+# against real action metadata -- runner labels, action inputs, expressions --
+# which is the closest thing to running the workflow that is possible without
+# Docker. It is optional so a clone without it still builds.
+lint_workflows() {
+  [ -d "$ROOT/.github/workflows" ] || { note "  no workflows"; return 0; }
+  local lint="" candidate
+  for candidate in \
+      "${OD_ACTIONLINT_BIN:-}" \
+      "$(command -v actionlint 2>/dev/null || true)" \
+      "$HOME/.local/bin/actionlint"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then lint="$candidate"; break; fi
+  done
+  if [ -z "${lint:-}" ]; then
+    warn "actionlint not installed -- workflow YAML unchecked (./dev actionlint)"
+    return 0
+  fi
+  (cd "$ROOT" && "$lint") && ok "workflows clean"
+}
+
+cmd_actionlint() {
+  require_go
+  if [ -x "$HOME/.local/bin/actionlint" ]; then
+    ok "already installed: $HOME/.local/bin/actionlint"
+    return 0
+  fi
+  step "Installing actionlint"
+  mkdir -p "$HOME/.local/bin"
+  GOBIN="$HOME/.local/bin" "$GO" install github.com/rhysd/actionlint/cmd/actionlint@latest
+  ok "installed $HOME/.local/bin/actionlint"
+}
+
+# check is the fast gate: no external backends, so pgstore and voice skip.
+cmd_check() {
+  require_go
+  cd "$ROOT"
+  gate
+}
+
+# ci is the full gate. It uses backends handed to it through the environment
+# (that is how GitHub supplies PostgreSQL) and starts anything missing locally,
+# which is what makes './dev ci' behave the same on a laptop and on a runner.
+cmd_ci() {
   require_go
   cd "$ROOT"
   trap cleanup EXIT INT TERM
 
-  local pg_ok=0 lk_ok=0
-  if find_pg >/dev/null 2>&1; then pg_start && pg_ok=1; else
+  if [ -n "${OD_TEST_POSTGRES_DSN:-}" ]; then
+    ok "using PostgreSQL from the environment"
+  elif find_pg >/dev/null 2>&1; then
+    pg_start
+    export OD_TEST_POSTGRES_DSN="$PG_DSN"
+  else
     warn "PostgreSQL unavailable -- the pgstore suite will skip"
   fi
-  if livekit_start; then lk_ok=1; else
-    warn "LiveKit unavailable -- the voice suite will skip (run './dev livekit')"
+
+  if [ -n "${OD_TEST_LIVEKIT_URL:-}" ]; then
+    ok "using LiveKit from the environment"
+  else
+    find_livekit >/dev/null 2>&1 || cmd_livekit
+    if livekit_start; then
+      export OD_TEST_LIVEKIT_URL="http://127.0.0.1:$LK_PORT"
+      export OD_TEST_LIVEKIT_KEY=devkey
+      export OD_TEST_LIVEKIT_SECRET=secret
+    else
+      warn "LiveKit unavailable -- the voice suite will skip"
+    fi
   fi
 
-  step "go test -race ./... (with every backend this machine can offer)"
-  local env_args=()
-  [ "$pg_ok" -eq 1 ] && env_args+=("OD_TEST_POSTGRES_DSN=$PG_DSN")
-  if [ "$lk_ok" -eq 1 ]; then
-    env_args+=("OD_TEST_LIVEKIT_URL=http://127.0.0.1:$LK_PORT"
-               "OD_TEST_LIVEKIT_KEY=devkey" "OD_TEST_LIVEKIT_SECRET=secret")
-  fi
-  env "${env_args[@]}" "$GO" test -race -count=1 ./...
-
-  echo
-  [ "$pg_ok" -eq 1 ] && ok "pgstore suite ran against a real PostgreSQL" \
-                     || warn "pgstore suite skipped"
-  [ "$lk_ok" -eq 1 ] && ok "voice suite ran against a real LiveKit" \
-                     || warn "voice suite skipped"
+  gate
 }
 
 cmd_livekit() {
@@ -396,8 +485,9 @@ usage() {
 case "${1:-demo}" in
   demo)     cmd_demo ;;
   run)      shift; cmd_run "$@" ;;
-  check)    cmd_check ;;
-  test)     cmd_test ;;
+  check)      cmd_check ;;
+  test|ci)    cmd_ci ;;
+  actionlint) cmd_actionlint ;;
   livekit)  cmd_livekit ;;
   doctor)   cmd_doctor ;;
   clean)    cmd_clean ;;
