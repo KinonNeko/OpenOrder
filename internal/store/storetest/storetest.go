@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/opendiscord/opendiscord/internal/store"
+	"github.com/KinonNeko/openorder/internal/store"
 )
 
 // Run executes the suite. newStore must return a store with no data in it;
@@ -75,14 +75,14 @@ func testTokens(t *testing.T, s store.Store) {
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateToken(ctx, "odt_abc", u.ID); err != nil {
+	if err := s.CreateToken(ctx, "oot_abc", u.ID); err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
-	uid, err := s.UserIDByToken(ctx, "odt_abc")
+	uid, err := s.UserIDByToken(ctx, "oot_abc")
 	if err != nil || uid != u.ID {
 		t.Fatalf("UserIDByToken = %q, %v", uid, err)
 	}
-	if _, err := s.UserIDByToken(ctx, "odt_nope"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.UserIDByToken(ctx, "oot_nope"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown token err = %v, want ErrNotFound", err)
 	}
 }

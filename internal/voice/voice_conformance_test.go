@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/opendiscord/opendiscord/internal/store"
+	"github.com/KinonNeko/openorder/internal/store"
 )
 
 // These tests pin our hand-rolled LiveKit token against a real livekit-server.
@@ -22,22 +22,22 @@ import (
 // Run against a local dev server:
 //
 //	livekit-server --dev --bind 127.0.0.1 &
-//	OD_TEST_LIVEKIT_URL=http://127.0.0.1:7880 \
-//	OD_TEST_LIVEKIT_KEY=devkey OD_TEST_LIVEKIT_SECRET=secret go test ./internal/voice
+//	OO_TEST_LIVEKIT_URL=http://127.0.0.1:7880 \
+//	OO_TEST_LIVEKIT_KEY=devkey OO_TEST_LIVEKIT_SECRET=secret go test ./internal/voice
 //
 // Without those vars the conformance test skips, so `go test ./...` stays green
 // on a machine with no SFU.
 
 func testService(t *testing.T) (*Service, string) {
 	t.Helper()
-	base := os.Getenv("OD_TEST_LIVEKIT_URL")
+	base := os.Getenv("OO_TEST_LIVEKIT_URL")
 	if base == "" {
-		t.Skip("OD_TEST_LIVEKIT_URL not set; skipping LiveKit conformance test")
+		t.Skip("OO_TEST_LIVEKIT_URL not set; skipping LiveKit conformance test")
 	}
 	return New(Config{
 		URL:       base,
-		APIKey:    envOr("OD_TEST_LIVEKIT_KEY", "devkey"),
-		APISecret: envOr("OD_TEST_LIVEKIT_SECRET", "secret"),
+		APIKey:    envOr("OO_TEST_LIVEKIT_KEY", "devkey"),
+		APISecret: envOr("OO_TEST_LIVEKIT_SECRET", "secret"),
 	}), base
 }
 
@@ -86,7 +86,7 @@ func TestLiveKitAcceptsOurToken(t *testing.T) {
 
 func TestLiveKitRejectsWrongSecret(t *testing.T) {
 	_, base := testService(t)
-	bad := New(Config{URL: base, APIKey: envOr("OD_TEST_LIVEKIT_KEY", "devkey"), APISecret: "not-the-secret"})
+	bad := New(Config{URL: base, APIKey: envOr("OO_TEST_LIVEKIT_KEY", "devkey"), APISecret: "not-the-secret"})
 	token, err := bad.IssueToken(testUser, "48291057123330", Speaker())
 	if err != nil {
 		t.Fatalf("IssueToken: %v", err)

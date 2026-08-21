@@ -1,4 +1,4 @@
--- OpenDiscord schema, applied idempotently at startup (v0; real migrations at M1).
+-- OpenOrder schema, applied idempotently at startup (v0; real migrations at M1).
 -- IDs are snowflakes stored as BIGINT; the API layer converts to/from strings.
 
 CREATE TABLE IF NOT EXISTS users (

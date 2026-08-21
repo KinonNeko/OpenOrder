@@ -1,4 +1,4 @@
-// Package voice maps OpenDiscord voice channels onto LiveKit rooms and mints
+// Package voice maps OpenOrder voice channels onto LiveKit rooms and mints
 // the join tokens clients present to the SFU (docs/PROTOCOL.md §5,
 // docs/PLANNING.md §3.1 decision C).
 //
@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/opendiscord/opendiscord/internal/store"
+	"github.com/KinonNeko/openorder/internal/store"
 )
 
 // Room name prefix. Channel IDs are snowflakes and already globally unique;
@@ -151,7 +151,7 @@ func (s *Service) IssueAdminToken(room string) (string, error) {
 	now := time.Now()
 	return signHS256(lkClaims{
 		Iss: s.cfg.APIKey,
-		Sub: "opendiscord-server",
+		Sub: "openorder-server",
 		Nbf: now.Add(-10 * time.Second).Unix(),
 		Exp: now.Add(30 * time.Second).Unix(),
 		Video: lkVideoGrant{

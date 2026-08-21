@@ -1,7 +1,33 @@
 # 交接文档(→ 下一个会话)
 
-> 目的:让一个全新会话(无本会话上下文)无缝接管 OpenDiscord 开发。
-> 最后更新:2026-08-21,LiveKit 验证 + 六项不一致修复 + CI 与 `./dev` 入口完成时。
+> 目的:让一个全新会话(无本会话上下文)无缝接管 OpenOrder 开发。
+> 最后更新:2026-08-21,改名 OpenOrder 时。
+
+## 〇、项目改过名(2026-08-21)
+
+**`OpenDiscord` → `OpenOrder`**,在公开仓库之前完成。
+
+原因是商标:`Discord` 是 Discord Inc. 的注册商标,拿它命名一个**同品类竞品**属于
+风险最高的一档(同类产品 + 近似标识 = 典型的混淆可能性),而 `Open` 前缀反而加重
+指向性。同赛道有先例:Fosscord 改名为 Spacebar,普遍认为正是出于这类压力。
+(以上不构成法律意见。)
+
+**注意这个区分**:用 Discord 来*描述*本项目是没问题的(「Discord 替代品」
+「概念与 Discord 对齐」属于指称性使用),PLANNING 的竞品分析里 27 处 `Discord`
+是刻意保留的 —— 不要在后续改名清理中把它们一起替换掉。有问题的只是拿它当**产品名**。
+
+改名同时修掉了一个既有错误:旧 module path 是 `github.com/opendiscord/opendiscord`,
+指向一个**并不属于我们的 GitHub 组织**,别人 `go get` 根本拿不到代码。现在是
+`github.com/KinonNeko/openorder`,与真实仓库一致。
+
+一并改掉的标识:环境变量前缀 `OD_` → `OO_`,Token 前缀 `odt_` → `oot_`,
+二进制与目录 `cmd/openorder/`,PG 库名/用户名,LiveKit 管理身份 `openorder-server`,
+本地 PG 二进制目录 `~/.local/share/openorder/pg`。
+
+> 遗留项(不影响功能):本地工作目录仍叫 `~/ClaudeProjects/OpenDiscord`;
+> GitHub 会**永久保留**旧仓库 URL 的重定向,想彻底断开关联只能新建仓库并删除旧的。
+> git 历史里也仍带旧名(改名前的提交),这是刻意保留的 —— 早期改名很常见,
+> 而那些提交信息记录了大量决策理由,压掉可惜。
 
 ## 一、项目是什么
 
@@ -64,8 +90,8 @@
 ./dev clean      # 清掉 .dev/
 ```
 
-脚本自己找 Go(含 `~/.local/go`)、找 PostgreSQL(`~/.local/share/opendiscord/pg`,
-可用 `OD_PG_BIN` 覆盖)、找 livekit-server。端口冲突用 `OD_PORT=` 换。
+脚本自己找 Go(含 `~/.local/go`)、找 PostgreSQL(`~/.local/share/openorder/pg`,
+可用 `OO_PG_BIN` 覆盖)、找 livekit-server。端口冲突用 `OO_PORT=` 换。
 本地状态都在 `.dev/`(已 gitignore)。
 
 写脚本时踩到并已修的两个坑,改它时别踩回去:
@@ -75,7 +101,7 @@
   所以 `cleanup()` 里第一行是 `set +e`。
 - **`go run` 不可靠地转发信号** —— 它把服务器起成孙子进程,Ctrl-C 只杀掉
   `go run` 本身,真正占着端口的二进制活得好好的。现在改为先 `go build` 到
-  `.dev/opendiscord` 再直接执行,信号链才是通的(顺带让重启变快)。
+  `.dev/openorder` 再直接执行,信号链才是通的(顺带让重启变快)。
 
 ## 四、CI
 
@@ -136,8 +162,8 @@ gofmt / vet / build / `test -race` → `assert_suites_ran` 确认两个外部套
 
   ```sh
   livekit-server --dev --bind 127.0.0.1     # devkey / secret,HTTP 7880
-  OD_TEST_LIVEKIT_URL=http://127.0.0.1:7880 \
-  OD_TEST_LIVEKIT_KEY=devkey OD_TEST_LIVEKIT_SECRET=secret \
+  OO_TEST_LIVEKIT_URL=http://127.0.0.1:7880 \
+  OO_TEST_LIVEKIT_KEY=devkey OO_TEST_LIVEKIT_SECRET=secret \
     go test -v -count=1 ./internal/voice
   ```
 
@@ -155,10 +181,10 @@ gofmt / vet / build / `test -race` → `assert_suites_ran` 确认两个外部套
 
 ```sh
 export PATH=$HOME/.local/go/bin:$PATH
-go run ./cmd/opendiscord        # 内存存储,:8080,开两个浏览器注册两个号即可对聊
+go run ./cmd/openorder        # 内存存储,:8080,开两个浏览器注册两个号即可对聊
 ```
 
-PG 模式:`OD_STORE=postgres OD_POSTGRES_DSN='postgres://…' go run ./cmd/opendiscord`。
+PG 模式:`OO_STORE=postgres OO_POSTGRES_DSN='postgres://…' go run ./cmd/openorder`。
 环境变量表在 README.md。
 
 ## 七、已定的协议决策(2026-08-21,六项一次性补齐)

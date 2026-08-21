@@ -13,7 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/opendiscord/opendiscord/internal/store"
+	"github.com/KinonNeko/openorder/internal/store"
 )
 
 //go:embed schema.sql

@@ -8,21 +8,21 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/opendiscord/opendiscord/internal/store"
-	"github.com/opendiscord/opendiscord/internal/store/pgstore"
-	"github.com/opendiscord/opendiscord/internal/store/storetest"
+	"github.com/KinonNeko/openorder/internal/store"
+	"github.com/KinonNeko/openorder/internal/store/pgstore"
+	"github.com/KinonNeko/openorder/internal/store/storetest"
 )
 
 // pgstore runs the same suite as memstore: the two are meant to be
 // interchangeable, and only a shared suite keeps that honest.
 //
-//	OD_TEST_POSTGRES_DSN='postgres://…?sslmode=disable' go test ./internal/store/pgstore
+//	OO_TEST_POSTGRES_DSN='postgres://…?sslmode=disable' go test ./internal/store/pgstore
 //
 // Without the DSN this skips, so `go test ./...` stays green without a database.
 func TestPgstoreConformance(t *testing.T) {
-	dsn := os.Getenv("OD_TEST_POSTGRES_DSN")
+	dsn := os.Getenv("OO_TEST_POSTGRES_DSN")
 	if dsn == "" {
-		t.Skip("OD_TEST_POSTGRES_DSN not set; skipping pgstore conformance test")
+		t.Skip("OO_TEST_POSTGRES_DSN not set; skipping pgstore conformance test")
 	}
 	storetest.Run(t, func(t *testing.T) store.Store {
 		t.Helper()

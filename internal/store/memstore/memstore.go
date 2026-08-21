@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/opendiscord/opendiscord/internal/store"
+	"github.com/KinonNeko/openorder/internal/store"
 )
 
 type Mem struct {

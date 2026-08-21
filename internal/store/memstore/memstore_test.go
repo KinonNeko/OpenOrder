@@ -3,9 +3,9 @@ package memstore_test
 import (
 	"testing"
 
-	"github.com/opendiscord/opendiscord/internal/store"
-	"github.com/opendiscord/opendiscord/internal/store/memstore"
-	"github.com/opendiscord/opendiscord/internal/store/storetest"
+	"github.com/KinonNeko/openorder/internal/store"
+	"github.com/KinonNeko/openorder/internal/store/memstore"
+	"github.com/KinonNeko/openorder/internal/store/storetest"
 )
 
 func TestMemstoreConformance(t *testing.T) {

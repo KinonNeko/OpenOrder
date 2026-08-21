@@ -12,10 +12,10 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/opendiscord/opendiscord/internal/auth"
-	"github.com/opendiscord/opendiscord/internal/ids"
-	"github.com/opendiscord/opendiscord/internal/store"
-	"github.com/opendiscord/opendiscord/internal/store/memstore"
+	"github.com/KinonNeko/openorder/internal/auth"
+	"github.com/KinonNeko/openorder/internal/ids"
+	"github.com/KinonNeko/openorder/internal/store"
+	"github.com/KinonNeko/openorder/internal/store/memstore"
 )
 
 // guildsOf lets a test say which guilds a given user belongs to, which is what
@@ -228,7 +228,7 @@ func TestBadTokenCloses4004(t *testing.T) {
 	h := newHarness(t, nil)
 	conn := h.dial(t)
 	readFrame(t, conn) // HELLO
-	if err := conn.WriteJSON(Frame{Op: OpIdentify, D: json.RawMessage(`{"token":"odt_nope"}`)}); err != nil {
+	if err := conn.WriteJSON(Frame{Op: OpIdentify, D: json.RawMessage(`{"token":"oot_nope"}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if code := closeCode(t, conn); code != CloseAuthFailed {

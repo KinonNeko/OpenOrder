@@ -13,12 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/opendiscord/opendiscord/internal/auth"
-	"github.com/opendiscord/opendiscord/internal/gateway"
-	"github.com/opendiscord/opendiscord/internal/httpapi"
-	"github.com/opendiscord/opendiscord/internal/ids"
-	"github.com/opendiscord/opendiscord/internal/store"
-	"github.com/opendiscord/opendiscord/internal/store/memstore"
+	"github.com/KinonNeko/openorder/internal/auth"
+	"github.com/KinonNeko/openorder/internal/gateway"
+	"github.com/KinonNeko/openorder/internal/httpapi"
+	"github.com/KinonNeko/openorder/internal/ids"
+	"github.com/KinonNeko/openorder/internal/store"
+	"github.com/KinonNeko/openorder/internal/store/memstore"
 )
 
 type rig struct {
@@ -189,7 +189,7 @@ func TestErrorCodes(t *testing.T) {
 			http.StatusUnauthorized, "invalid_credentials"},
 		{"no token", "GET", "/users/@me", "", nil,
 			http.StatusUnauthorized, "unauthorized"},
-		{"bad token", "GET", "/users/@me", "odt_nope", nil,
+		{"bad token", "GET", "/users/@me", "oot_nope", nil,
 			http.StatusUnauthorized, "unauthorized"},
 		{"short password", "POST", "/auth/register", "",
 			map[string]string{"username": "bob", "password": "short"},

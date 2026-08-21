@@ -1,4 +1,4 @@
-# OpenDiscord
+# OpenOrder
 
 可自托管的、Discord 级体验的开源社区通讯平台(早期开发中,当前处于 M0 阶段)。
 
@@ -48,7 +48,7 @@ docker compose 因开发机无 Docker 尚未整体验证。
 
 ```sh
 export PATH=$HOME/.local/go/bin:$PATH
-go run ./cmd/opendiscord        # 内存存储,:8080
+go run ./cmd/openorder        # 内存存储,:8080
 ```
 
 ## Docker Compose(PostgreSQL 持久化)
@@ -74,11 +74,11 @@ docker compose up --build
 手工等价命令:
 
 ```sh
-OD_TEST_POSTGRES_DSN='postgres://…?sslmode=disable' go test ./internal/store/...
+OO_TEST_POSTGRES_DSN='postgres://…?sslmode=disable' go test ./internal/store/...
 
 livekit-server --dev --bind 127.0.0.1
-OD_TEST_LIVEKIT_URL=http://127.0.0.1:7880 \
-OD_TEST_LIVEKIT_KEY=devkey OD_TEST_LIVEKIT_SECRET=secret go test ./internal/voice
+OO_TEST_LIVEKIT_URL=http://127.0.0.1:7880 \
+OO_TEST_LIVEKIT_KEY=devkey OO_TEST_LIVEKIT_SECRET=secret go test ./internal/voice
 ```
 
 ## CI

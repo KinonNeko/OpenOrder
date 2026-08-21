@@ -1,11 +1,11 @@
-// opendiscord: modular-monolith server entrypoint.
+// openorder: modular-monolith server entrypoint.
 //
 // Configuration (env):
 //
-//	OD_ADDR         listen address           (default ":8080")
-//	OD_STORE        "memory" | "postgres"    (default "memory")
-//	OD_POSTGRES_DSN DSN when OD_STORE=postgres
-//	OD_NODE_ID      snowflake node id 0-1023 (default 0)
+//	OO_ADDR         listen address           (default ":8080")
+//	OO_STORE        "memory" | "postgres"    (default "memory")
+//	OO_POSTGRES_DSN DSN when OO_STORE=postgres
+//	OO_NODE_ID      snowflake node id 0-1023 (default 0)
 package main
 
 import (
@@ -19,14 +19,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/opendiscord/opendiscord/internal/auth"
-	"github.com/opendiscord/opendiscord/internal/gateway"
-	"github.com/opendiscord/opendiscord/internal/httpapi"
-	"github.com/opendiscord/opendiscord/internal/ids"
-	"github.com/opendiscord/opendiscord/internal/store"
-	"github.com/opendiscord/opendiscord/internal/store/memstore"
-	"github.com/opendiscord/opendiscord/internal/store/pgstore"
-	"github.com/opendiscord/opendiscord/web"
+	"github.com/KinonNeko/openorder/internal/auth"
+	"github.com/KinonNeko/openorder/internal/gateway"
+	"github.com/KinonNeko/openorder/internal/httpapi"
+	"github.com/KinonNeko/openorder/internal/ids"
+	"github.com/KinonNeko/openorder/internal/store"
+	"github.com/KinonNeko/openorder/internal/store/memstore"
+	"github.com/KinonNeko/openorder/internal/store/pgstore"
+	"github.com/KinonNeko/openorder/web"
 )
 
 func env(key, def string) string {
@@ -41,16 +41,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	node, _ := strconv.ParseUint(env("OD_NODE_ID", "0"), 10, 64)
+	node, _ := strconv.ParseUint(env("OO_NODE_ID", "0"), 10, 64)
 	gen := ids.NewGenerator(node)
 
 	var st store.Store
-	switch mode := env("OD_STORE", "memory"); mode {
+	switch mode := env("OO_STORE", "memory"); mode {
 	case "memory":
 		st = memstore.New()
 		log.Warn("using in-memory store; data is lost on restart")
 	case "postgres":
-		pg, err := pgstore.Open(ctx, os.Getenv("OD_POSTGRES_DSN"))
+		pg, err := pgstore.Open(ctx, os.Getenv("OO_POSTGRES_DSN"))
 		if err != nil {
 			log.Error("open postgres", "err", err)
 			os.Exit(1)
@@ -58,7 +58,7 @@ func main() {
 		defer pg.Close()
 		st = pg
 	default:
-		log.Error("unknown OD_STORE", "value", mode)
+		log.Error("unknown OO_STORE", "value", mode)
 		os.Exit(1)
 	}
 
@@ -75,7 +75,7 @@ func main() {
 	api.Routes(mux)
 	mux.Handle("/", web.Handler())
 
-	addr := env("OD_ADDR", ":8080")
+	addr := env("OO_ADDR", ":8080")
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -84,7 +84,7 @@ func main() {
 		srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Info("opendiscord listening", "addr", addr, "store", env("OD_STORE", "memory"))
+	log.Info("openorder listening", "addr", addr, "store", env("OO_STORE", "memory"))
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("serve", "err", err)
 		os.Exit(1)

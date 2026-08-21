@@ -1,4 +1,4 @@
-module github.com/opendiscord/opendiscord
+module github.com/KinonNeko/openorder
 
 go 1.27
 

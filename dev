@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# dev -- one entry point for building, running and testing OpenDiscord.
+# dev -- one entry point for building, running and testing OpenOrder.
 #
 # Exists because this project's dev loop has sharp edges that are easy to hit
 # and annoying to remember: Go is often not on PATH, there is no Docker here,
@@ -13,7 +13,7 @@
 #   ./dev run --pg     start the app on a local PostgreSQL
 #   ./dev check        lint + gofmt + vet + build + test -race
 #   ./dev test         check, plus the suites needing PostgreSQL and LiveKit
-#   ./dev ci           exactly what CI runs (alias of test; uses OD_TEST_* if set)
+#   ./dev ci           exactly what CI runs (alias of test; uses OO_TEST_* if set)
 #   ./dev livekit      build livekit-server from source (needed by ./dev test)
 #   ./dev actionlint   install the GitHub Actions linter used by ./dev check
 #   ./dev act          run the real workflow in Docker (needs Docker)
@@ -26,7 +26,7 @@ readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly DEV_DIR="$ROOT/.dev"
 readonly PG_PORT=55432
 readonly PG_DSN="postgres://postgres@127.0.0.1:${PG_PORT}/postgres?sslmode=disable"
-readonly APP_PORT="${OD_PORT:-8080}"
+readonly APP_PORT="${OO_PORT:-8080}"
 readonly LK_PORT=7880
 
 # ---------------------------------------------------------------- output ----
@@ -60,12 +60,12 @@ find_go() {
 
 # find_pg locates a PostgreSQL install. There is no Docker and no Homebrew on
 # the dev machine, so a standalone binary set is the supported route; the
-# search order lets OD_PG_BIN override everything.
+# search order lets OO_PG_BIN override everything.
 find_pg() {
   local candidate
   for candidate in \
-      "${OD_PG_BIN:-}" \
-      "$HOME/.local/share/opendiscord/pg/bin" \
+      "${OO_PG_BIN:-}" \
+      "$HOME/.local/share/openorder/pg/bin" \
       "$(command -v pg_ctl >/dev/null 2>&1 && dirname "$(command -v pg_ctl)" || true)"; do
     if [ -n "$candidate" ] && [ -x "$candidate/pg_ctl" ]; then echo "$candidate"; return 0; fi
   done
@@ -75,7 +75,7 @@ find_pg() {
 find_actionlint() {
   local candidate
   for candidate in \
-      "${OD_ACTIONLINT_BIN:-}" \
+      "${OO_ACTIONLINT_BIN:-}" \
       "$(command -v actionlint 2>/dev/null || true)" \
       "$HOME/.local/bin/actionlint"; do
     if [ -n "$candidate" ] && [ -x "$candidate" ]; then echo "$candidate"; return 0; fi
@@ -86,7 +86,7 @@ find_actionlint() {
 find_livekit() {
   local candidate
   for candidate in \
-      "${OD_LIVEKIT_BIN:-}" \
+      "${OO_LIVEKIT_BIN:-}" \
       "$(command -v livekit-server 2>/dev/null || true)" \
       "$HOME/.local/bin/livekit-server"; do
     if [ -n "$candidate" ] && [ -x "$candidate" ]; then echo "$candidate"; return 0; fi
@@ -120,7 +120,7 @@ PG_STARTED_BY_US=0
 
 pg_start() {
   PG_BIN="$(find_pg)" || die "no PostgreSQL found.
-  Set OD_PG_BIN to a directory containing pg_ctl/initdb/postgres,
+  Set OO_PG_BIN to a directory containing pg_ctl/initdb/postgres,
   or run './dev run' without --pg to use the in-memory store."
 
   if port_busy "$PG_PORT"; then
@@ -203,7 +203,7 @@ cmd_doctor() {
     ok "PostgreSQL $("$pg_bin/postgres" --version | awk '{print $3}')  ($pg_bin)"
   else
     warn "PostgreSQL not found -- './dev run --pg' and the pgstore suite are unavailable"
-    note "         set OD_PG_BIN=/path/to/pg/bin if you have one elsewhere"
+    note "         set OO_PG_BIN=/path/to/pg/bin if you have one elsewhere"
   fi
   if lk_bin="$(find_livekit)"; then
     ok "LiveKit   $("$lk_bin" --version 2>/dev/null | awk '{print $NF}')  ($lk_bin)"
@@ -225,7 +225,7 @@ cmd_doctor() {
 # './dev ci' rather than restating the steps in YAML, so the two cannot drift
 # and so the whole thing stays runnable on a laptop with no Docker.
 #
-# It honours OD_TEST_* from the environment: whatever backends are configured
+# It honours OO_TEST_* from the environment: whatever backends are configured
 # get used, and anything absent makes its suite skip.
 gate() {
   step "workflow lint"
@@ -256,10 +256,10 @@ gate() {
 # misconfigured DSN would show up as a green run rather than as lost coverage.
 assert_suites_ran() {
   local targets=() names=()
-  if [ -n "${OD_TEST_POSTGRES_DSN:-}" ]; then
+  if [ -n "${OO_TEST_POSTGRES_DSN:-}" ]; then
     targets+=("./internal/store/pgstore"); names+=("pgstore")
   fi
-  if [ -n "${OD_TEST_LIVEKIT_URL:-}" ]; then
+  if [ -n "${OO_TEST_LIVEKIT_URL:-}" ]; then
     targets+=("./internal/voice"); names+=("voice")
   fi
   if [ "${#targets[@]}" -eq 0 ]; then
@@ -322,25 +322,25 @@ cmd_ci() {
   cd "$ROOT"
   trap cleanup EXIT INT TERM
 
-  if [ -n "${OD_TEST_POSTGRES_DSN:-}" ]; then
+  if [ -n "${OO_TEST_POSTGRES_DSN:-}" ]; then
     ok "using PostgreSQL from the environment"
   elif find_pg >/dev/null 2>&1; then
     pg_start
-    export OD_TEST_POSTGRES_DSN="$PG_DSN"
+    export OO_TEST_POSTGRES_DSN="$PG_DSN"
   else
     warn "PostgreSQL unavailable -- the pgstore suite will skip"
   fi
 
   find_actionlint >/dev/null 2>&1 || cmd_actionlint
 
-  if [ -n "${OD_TEST_LIVEKIT_URL:-}" ]; then
+  if [ -n "${OO_TEST_LIVEKIT_URL:-}" ]; then
     ok "using LiveKit from the environment"
   else
     find_livekit >/dev/null 2>&1 || cmd_livekit
     if livekit_start; then
-      export OD_TEST_LIVEKIT_URL="http://127.0.0.1:$LK_PORT"
-      export OD_TEST_LIVEKIT_KEY=devkey
-      export OD_TEST_LIVEKIT_SECRET=secret
+      export OO_TEST_LIVEKIT_URL="http://127.0.0.1:$LK_PORT"
+      export OO_TEST_LIVEKIT_KEY=devkey
+      export OO_TEST_LIVEKIT_SECRET=secret
     else
       warn "LiveKit unavailable -- the voice suite will skip"
     fi
@@ -384,7 +384,7 @@ cleanup() {
 app_start() { # store mode: "memory" | "postgres"
   local mode="$1"
   if port_busy "$APP_PORT"; then
-    die "port $APP_PORT is already in use. Stop it, or set OD_PORT=<other>."
+    die "port $APP_PORT is already in use. Stop it, or set OO_PORT=<other>."
   fi
   mkdir -p "$DEV_DIR"
 
@@ -392,14 +392,14 @@ app_start() { # store mode: "memory" | "postgres"
   # a grandchild and does not reliably pass signals down to it, so Ctrl-C left
   # a server holding the port. Running it directly also makes restarts instant.
   step "Building"
-  "$GO" build -o "$DEV_DIR/opendiscord" ./cmd/opendiscord
+  "$GO" build -o "$DEV_DIR/openorder" ./cmd/openorder
 
-  step "Starting OpenDiscord on :$APP_PORT (store: $mode)"
+  step "Starting OpenOrder on :$APP_PORT (store: $mode)"
   if [ "$mode" = postgres ]; then
-    OD_ADDR=":$APP_PORT" OD_STORE=postgres OD_POSTGRES_DSN="$PG_DSN" \
-      "$DEV_DIR/opendiscord" &
+    OO_ADDR=":$APP_PORT" OO_STORE=postgres OO_POSTGRES_DSN="$PG_DSN" \
+      "$DEV_DIR/openorder" &
   else
-    OD_ADDR=":$APP_PORT" "$DEV_DIR/opendiscord" &
+    OO_ADDR=":$APP_PORT" "$DEV_DIR/openorder" &
   fi
   APP_PID=$!
   if ! wait_for_http "http://127.0.0.1:$APP_PORT/api/v0/gateway" 60; then
@@ -456,7 +456,7 @@ cmd_demo() {
   seed
   cat <<EOF
 
-  ${C_BOLD}OpenDiscord is running: http://localhost:$APP_PORT${C_OFF}
+  ${C_BOLD}OpenOrder is running: http://localhost:$APP_PORT${C_OFF}
 
   To see the realtime loop, open it in ${C_BOLD}two${C_OFF} windows -- one normal, one
   private/incognito, so they hold separate sessions -- and sign in as:

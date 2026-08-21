@@ -1,4 +1,4 @@
-# OpenDiscord single-node deployment (PLANNING.md: PG + Redis + MinIO, nothing else).
+# OpenOrder single-node deployment (PLANNING.md: PG + Redis + MinIO, nothing else).
 # Redis and MinIO are not consumed by the v0 code path yet; they are part of the
 # committed dependency envelope (M1: presence/fan-out; M1: attachments).
 services:
@@ -7,9 +7,9 @@ services:
     ports:
       - "8080:8080"
     environment:
-      OD_ADDR: ":8080"
-      OD_STORE: postgres
-      OD_POSTGRES_DSN: postgres://opendiscord:opendiscord@postgres:5432/opendiscord?sslmode=disable
+      OO_ADDR: ":8080"
+      OO_STORE: postgres
+      OO_POSTGRES_DSN: postgres://openorder:openorder@postgres:5432/openorder?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy
@@ -17,13 +17,13 @@ services:
   postgres:
     image: postgres:17-alpine
     environment:
-      POSTGRES_USER: opendiscord
-      POSTGRES_PASSWORD: opendiscord
-      POSTGRES_DB: opendiscord
+      POSTGRES_USER: openorder
+      POSTGRES_PASSWORD: openorder
+      POSTGRES_DB: openorder
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U opendiscord"]
+      test: ["CMD-SHELL", "pg_isready -U openorder"]
       interval: 3s
       timeout: 3s
       retries: 20
@@ -37,8 +37,8 @@ services:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: opendiscord
-      MINIO_ROOT_PASSWORD: opendiscord
+      MINIO_ROOT_USER: openorder
+      MINIO_ROOT_PASSWORD: openorder
     volumes:
       - miniodata:/data
 

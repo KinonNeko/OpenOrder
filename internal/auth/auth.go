@@ -11,8 +11,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/opendiscord/opendiscord/internal/ids"
-	"github.com/opendiscord/opendiscord/internal/store"
+	"github.com/KinonNeko/openorder/internal/ids"
+	"github.com/KinonNeko/openorder/internal/store"
 )
 
 var (
@@ -93,6 +93,6 @@ func (s *Service) issueToken(ctx context.Context, userID string) (string, error)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
-	token := "odt_" + hex.EncodeToString(buf)
+	token := "oot_" + hex.EncodeToString(buf)
 	return token, s.store.CreateToken(ctx, token, userID)
 }

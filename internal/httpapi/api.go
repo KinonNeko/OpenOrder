@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/opendiscord/opendiscord/internal/auth"
-	"github.com/opendiscord/opendiscord/internal/gateway"
-	"github.com/opendiscord/opendiscord/internal/ids"
-	"github.com/opendiscord/opendiscord/internal/store"
+	"github.com/KinonNeko/openorder/internal/auth"
+	"github.com/KinonNeko/openorder/internal/gateway"
+	"github.com/KinonNeko/openorder/internal/ids"
+	"github.com/KinonNeko/openorder/internal/store"
 )
 
 const maxMessageLen = 4000

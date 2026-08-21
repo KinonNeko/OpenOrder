@@ -21,17 +21,17 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-      # ./dev ci starts its own PostgreSQL when OD_TEST_POSTGRES_DSN is unset;
+      # ./dev ci starts its own PostgreSQL when OO_TEST_POSTGRES_DSN is unset;
       # on a runner a service container is cheaper, so hand it one.
       postgres:
         image: postgres:17-alpine
         env:
-          POSTGRES_USER: opendiscord
-          POSTGRES_PASSWORD: opendiscord
-          POSTGRES_DB: opendiscord
+          POSTGRES_USER: openorder
+          POSTGRES_PASSWORD: openorder
+          POSTGRES_DB: openorder
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U opendiscord"
+          --health-cmd "pg_isready -U openorder"
           --health-interval 3s
           --health-timeout 3s
           --health-retries 20
@@ -48,5 +48,5 @@ jobs:
       # does locally. It fails the run if the voice suite then skips.
       - name: Run the gate
         env:
-          OD_TEST_POSTGRES_DSN: postgres://opendiscord:opendiscord@127.0.0.1:5432/opendiscord?sslmode=disable
+          OO_TEST_POSTGRES_DSN: postgres://openorder:openorder@127.0.0.1:5432/openorder?sslmode=disable
         run: ./dev ci

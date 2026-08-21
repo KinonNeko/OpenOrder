@@ -17,8 +17,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/opendiscord/opendiscord/internal/auth"
-	"github.com/opendiscord/opendiscord/internal/store"
+	"github.com/KinonNeko/openorder/internal/auth"
+	"github.com/KinonNeko/openorder/internal/store"
 )
 
 // Opcodes (PROTOCOL §4.2).
